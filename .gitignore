@@ -1,0 +1,11 @@
+# Ignore binary files
+*.docx
+*.pdf
+
+# Ignore node modules
+node_modules/
+
+# Ignore debug/logs/temp files
+output.txt
+*.log
+.system_generated/
