@@ -359,9 +359,3 @@ function _trouverDerniereIndexProcessus(table, nomProcessusNormalise, numRows) {
   }
   return dernierIndex;
 }
- pSig = body.appendParagraph(`Identifiant de signature : ${signatureId}`);
-  pSig.setFontFamily("Courier New"); // Police machine à écrire pour l'aspect technique
-  
-  doc.saveAndClose();
-}
-
