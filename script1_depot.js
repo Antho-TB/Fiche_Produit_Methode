@@ -12,8 +12,8 @@ const CFG = {
 
   // IDs des questions pré-remplissables dans le Formulaire 2
   ENTRY_SIGNATURE_ID: "entry.1011529723",  // Identifiant de signature (Form 2)
-  ENTRY_APPROUVES:    "entry.587233368",   // Processus approuvé(s) (Form 2, cases à cocher)
-  ENTRY_REFUSES:      "entry.159357482",   // Processus refusé(s) (Form 2, cases à cocher - placeholder)
+  ENTRY_APPROUVES:    "entry.314648121",   // Processus approuvé(s) (Form 2, cases à cocher)
+  ENTRY_REFUSES:      "entry.1659432920",  // Processus refusé(s) (Form 2, cases à cocher)
 
   // IDs des Google Sheets
   ID_SHEET_CONFIG:   "1-2RpSS6n8FyKhD9rGVGxqFlmJKTfXd0bm3ylZxm6pFA",
