@@ -8,8 +8,8 @@ Ce projet automatise et sécurise la validation collective des fiches méthodes 
 
 L'objectif de cette automatisation est d'éradiquer les goulots d'étranglement administratifs tout en garantissant une traçabilité d'audit stricte. Elle résout trois problèmes majeurs :
 * **La Perte d'Information** : Les validations par e-mails informels ou via des conversations orales sont remplacées par des transactions signées, traçables et figées dans le marbre.
-* **La Dépendance Temporelle** : Les validateurs reçoivent des formulaires pré-remplis à la volée. Plus besoin de chercher quel document valider ni de modifier manuellement le tableau de suivi.
-* **L'Intégrité Documentaire** : La signature n'est pas une simple image copiée/collée, mais une ligne insérée dynamiquement dans le tableau du document natif, couplée à un identifiant unique (scellement), le tout converti en PDF inaltérable.
+* **La Dépendance Temporelle et Ergonomie** : Les validateurs reçoivent un formulaire pré-rempli unique par document regroupant l'ensemble des processus sous leur responsabilité. Plus besoin de soumettre plusieurs formulaires.
+* **L'Intégrité Documentaire** : La signature n'est pas une simple image copiée/collée, mais une ligne insérée dynamiquement dans le tableau du document natif (page 2), couplée à un identifiant unique (scellement), le tout converti en PDF inaltérable. Le bandeau de signature en fin de document a été supprimé à la demande du métier pour ne pas surcharger le livrable.
 
 ---
 
@@ -19,27 +19,33 @@ Le système fonctionne comme un "Sas de Validation" asynchrone réparti sur deux
 
 ```mermaid
 graph TD
-    A[Formulaire 1 : Dépôt du .docx] -->|Trigger surNouvelleDemande| B(Script 1 : Copie, Conversion GDOC & Routage Mail)
+    A[Formulaire 1 : Dépôt du .docx + Option Sous-traitance] -->|Trigger surNouvelleDemande| B(Script 1 : Détection relance, Copie, Conversion GDOC & Routage Mail)
     B -->|Écriture Statut EN_ATTENTE| C[Google Sheet Central : Tracker]
-    B -->|Boutons pré-remplis avec ID Unique| D[Boîte Mail du Validateur]
-    D -->|Lien de décision| E[Formulaire 2 : Décision du Validateur]
-    E -->|Trigger surDecision| F(Script 2 : Mise à jour Tracker & Signature GDOC)
+    B -->|Boutons pré-remplis avec ID Unique de groupe| D[Boîte Mail du Validateur]
+    D -->|Lien de décision unique| E[Formulaire 2 : Décision du Validateur - Cases à cocher]
+    E -->|Trigger surDecision| F(Script 2 : Traitement groupé, Tracker & Signature GDOC)
     F -->|Si tous les validateurs ont approuvé| G[Génération PDF scellé & Classement par Client]
+    G -->|Notification finale| H[Email à Sandrine & Déposant]
 ```
 
 ### Phase 1 : Le Dépôt (script1_depot.js)
-1. **Interception** : À la soumission du Formulaire 1, le script récupère les métadonnées (Référence, Révision, Client, Fichier source `.docx` et liste des processus à valider).
+1. **Interception** : À la soumission du Formulaire 1, le script récupère les métadonnées (Référence, Révision, Client, Fichier source `.docx`, liste des processus à valider, et l'option "Sous-traitance").
 2. **Nomenclature** : Il renomme le fichier d'origine selon la norme usine : `FOR-PRO-[Ref]_REV[Rev]`.
-3. **Conversion invisible** : Afin de modifier programmatiquement le document, le script convertit le `.docx` d'origine en Google Doc de travail temporaire via l'API Drive v3.
-4. **Routage intelligent** : Il recherche les adresses e-mails associées aux processus dans l'onglet de configuration `Config_Signataires`.
-5. **Scellement initial** : Pour chaque processus et chaque validateur, il génère un ID unique de signature (`SIG-AAAAMMJJ-XXXX`) et insère une ligne en statut `EN_ATTENTE` dans l'onglet `Tracker`.
-6. **Notification** : Il expédie un e-mail unique au validateur contenant un bouton d'action pré-rempli avec les paramètres d'approbation (Formulaire 2).
+3. **Cas de Sous-traitance** : Si l'option sous-traitance est cochée à "Oui", le script force Alex (`a.devaux@tb-groupe.fr`) comme signataire unique pour tous les processus sélectionnés.
+4. **Relance ciblée et ré-injection** : 
+   - Si la révision a déjà été soumise et possède des lignes dans le tracker (resoumission suite à un refus), le script met à jour l'ID du Google doc de travail sur toutes les lignes.
+   - Les signatures des validateurs ayant déjà approuvé sur la version précédente sont automatiquement ré-injectées dans le nouveau Google Doc.
+   - Seuls les processus qui ont été refusés (ou qui sont nouveaux) sont repassés à `EN_ATTENTE` et font l'objet d'une nouvelle demande de signature.
+5. **Routage groupé** : Pour chaque validateur concerné, le script génère un ID unique de signature (`SIG-AAAAMMJJ-XXXX`) partagé pour tous ses processus à valider lors de cette soumission.
+6. **Notification** : Il expédie un e-mail unique au validateur avec un lien d'action pré-remplissant toutes ses cases à "J'approuve".
 
 ### Phase 2 : La Décision (script2_decision.js)
-1. **Traitement du vote** : À la soumission du Formulaire 2, le script extrait l'ID unique de signature reçu.
-2. **Validation dans le Tracker** : Il cherche la ligne correspondante dans le `Tracker` et passe son statut à `APPROUVÉ` (ou `REFUSÉ` avec motif envoyé au déposant).
-3. **Signature dans le Document** : Il ouvre le Google Doc de travail, repère le tableau d'historique (identifié par la cellule `PROCESSUS*`), cherche la ligne du processus concerné, et y écrit la signature (E-mail + Date + ID Unique). Il ajoute également un bandeau visuel de scellement en fin de document.
-4. **Scellement final (PDF)** : Si tous les validateurs assignés à la fiche ont approuvé, le script exporte le Google Doc en PDF, crée un dossier au nom du Client dans le répertoire `03 - Fiches Validées`, y range le PDF finalisé et notifie le déposant.
+1. **Traitement groupé** : À la soumission du Formulaire 2, le script extrait l'ID unique de signature de groupe.
+2. **Interprétation des cases à cocher** : Le script extrait la liste des processus approuvés et refusés.
+3. **Mise à jour en masse** : Toutes les lignes du tracker correspondant à cet ID de signature sont traitées :
+   - Processus approuvés : Passage à `APPROUVÉ` et écriture de la signature dans le Google Doc (Page 2, tableau d'historique).
+   - Processus refusés : Passage à `REFUSÉ` et envoi instantané d'un email de refus avec motif au déposant.
+4. **Notification Sandrine & Fin de flux** : Si tous les processus du document sont validés (`APPROUVÉ` ou `ANNULÉ`), le Google Doc est converti en PDF, classé dans le dossier du Client (sous "03 - Fiches Validées"), et un email de validation finale est envoyé au déposant ainsi qu'à Sandrine (`s.guillemin@tb-groupe.fr`).
 
 ---
 
@@ -56,5 +62,13 @@ graph TD
 
 * **Erreur `Drive is not defined`** : Le service Avancé **Drive API** (v3) n'a pas été activé dans le menu "Services" de l'éditeur Apps Script de la feuille de réponses.
 * **Erreur `Tableau HISTORIQUE DES RÉVISIONS introuvable`** : Le tableau de signature du fichier Word importé ne contient pas `PROCESSUS*` ou `HISTORIQUE` dans sa première cellule (en haut à gauche). Le script utilise cette cellule comme point d'ancrage pour cibler le tableau.
-* **Problème de décalage de colonnes** : Si des questions sont ajoutées ou déplacées dans les formulaires, vérifiez l'onglet `Logs` pour voir la ligne `[DIAGNOSTIC] Valeurs brutes reçues`. Ajustez alors les index dans la constante `FORM1` ou `FORM2` des scripts.
+* **Problème de décalage de colonnes (Formulaire 2)** :
+  Le Formulaire 2 doit être configuré avec les colonnes suivantes :
+  - Colonne B : Votre adresse email (Email validateur)
+  - Colonne C : Identifiant de signature (`ENTRY_SIGNATURE_ID`)
+  - Colonne D : Processus approuvé(s) (Cases à cocher, `ENTRY_APPROUVES`)
+  - Colonne E : Processus refusé(s) (Cases à cocher, `ENTRY_REFUSES`)
+  - Colonne F : Motif du refus (Texte de paragraphe, `ENTRY_MOTIF`)
+  Ajustez les index dans les scripts s'ils diffèrent de la configuration.
 * **L'email de validation ne part pas** : Le validateur n'est pas ou est mal configuré dans l'onglet `Config_Signataires`, ou le processus soumis ne correspond pas exactement (attention à la casse et aux espaces).
+

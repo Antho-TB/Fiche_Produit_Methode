@@ -10,14 +10,12 @@ const CFG = {
   // URL du Formulaire 2 (Décision)
   URL_FORM_VALIDATION: "https://docs.google.com/forms/d/e/1FAIpQLSf8_40my2WTUGvhh_KlOwOW6BfpUMdFQiRAUklElWiqttOrGQ/viewform",
 
-    // IDs des questions pré-remplissables dans le Formulaire 2
-  // ⚠️ À REMPLIR après avoir ajouté les deux nouvelles questions dans le Form 2
-  // Méthode : Form 2 → ⋮ → "Obtenir un lien pré-rempli" → remplir les champs → copier l'URL → chercher entry.XXXXXXXXX
-  ENTRY_SIGNATURE_ID: "entry.1011529723",  // question "Identifiant de signature" (Form 2)
-  ENTRY_PROCESSUS:    "entry.587233368",   // question "Processus" (liste déroulante, Form 2)
+  // IDs des questions pré-remplissables dans le Formulaire 2
+  ENTRY_SIGNATURE_ID: "entry.1011529723",  // Identifiant de signature (Form 2)
+  ENTRY_APPROUVES:    "entry.587233368",   // Processus approuvé(s) (Form 2, cases à cocher)
+  ENTRY_REFUSES:      "entry.159357482",   // Processus refusé(s) (Form 2, cases à cocher - placeholder)
 
-
-  // IDs des Google Sheets (créés automatiquement)
+  // IDs des Google Sheets
   ID_SHEET_CONFIG:   "1-2RpSS6n8FyKhD9rGVGxqFlmJKTfXd0bm3ylZxm6pFA",
   ID_SHEET_TRACKER:  "1-2RpSS6n8FyKhD9rGVGxqFlmJKTfXd0bm3ylZxm6pFA",
 
@@ -35,6 +33,22 @@ const FORM1 = {
   NOM_CLIENT:     4,  // Nom du client (colonne E)
   PROCESSUS:      5,  // Processus modifiés (colonne F)
   URL_FICHIER:    6,  // Fichier source (.docx) (colonne G)
+  SOUS_TRAITANCE: 7,  // Sous-traitance (colonne H, facultatif)
+};
+
+// ---- INDEX DES COLONNES DANS LE TRACKER SHEET (0-based) ----
+const COL = {
+  REF_DOC:          0,   // A
+  CLIENT:           1,   // B
+  GOOGLE_DOC_ID:    2,   // C
+  PROCESSUS:        3,   // D
+  EMAIL_VALID:      4,   // E
+  SIGNATURE_ID:     5,   // F
+  STATUT:           6,   // G
+  DATE_SOUMISSION:  7,   // H
+  DATE_VALIDATION:  8,   // I
+  EMAIL_DEPOSANT:   9,   // J
+  NOM_DEPOSANT:     10,  // K
 };
 
 // ---- POINT D'ENTRÉE PRINCIPAL ----
@@ -51,21 +65,22 @@ function surNouvelleDemande(e) {
     const valeurs = e.values;
     _logToSheet("INFO", "[DIAGNOSTIC] Valeurs brutes reçues : " + JSON.stringify(valeurs));
 
-    // Vérification de la présence de toutes les colonnes requises
+    // Vérification de la présence de toutes les colonnes de base requises
     if (valeurs.length < 7) {
-      const msg = `[ERREUR] Le formulaire n'a pas renvoyé assez de colonnes (reçu : ${valeurs.length}, attendu : 7). Vérifiez si vous collectez bien l'adresse e-mail automatiquement.`;
+      const msg = `[ERREUR] Le formulaire n'a pas renvoyé assez de colonnes (reçu : ${valeurs.length}, attendu : 7 minimum).`;
       console.error(msg);
       _logToSheet("ERREUR", msg);
       return;
     }
 
     const emailDeposant = valeurs[FORM1.EMAIL_DEPOSANT] ? valeurs[FORM1.EMAIL_DEPOSANT].trim() : '';
-    const nomDeposant   = _nomDepuisEmail(emailDeposant); // lookup Config Sheet
+    const nomDeposant   = _nomDepuisEmail(emailDeposant);
     const refProduit    = valeurs[FORM1.REF_PRODUIT] ? valeurs[FORM1.REF_PRODUIT].trim() : '';
     const noRevision    = valeurs[FORM1.NO_REVISION] ? valeurs[FORM1.NO_REVISION].trim().padStart(3, '0') : '001';
     const nomClient     = valeurs[FORM1.NOM_CLIENT] ? valeurs[FORM1.NOM_CLIENT].trim() : 'INCONNU';
     const urlFichier    = valeurs[FORM1.URL_FICHIER] ? valeurs[FORM1.URL_FICHIER].trim() : '';
     const processusRaw  = valeurs[FORM1.PROCESSUS] || '';
+    const sousTraitance = valeurs[FORM1.SOUS_TRAITANCE] ? valeurs[FORM1.SOUS_TRAITANCE].trim() : 'Non';
 
     if (!urlFichier) {
       const msg = "[ERREUR] L'URL du fichier déposé est vide.";
@@ -101,7 +116,7 @@ function surNouvelleDemande(e) {
     }
 
     _logToSheet("INFO", "Fichier source ID : " + idFichier + " - Conversion en cours...");
-    // Conversion .docx → Google Doc natif (permet l'édition du tableau HISTORIQUE)
+    // Conversion .docx → Google Doc natif
     const idGoogleDoc = _convertirEnGoogleDoc(idFichier, reference);
     _logToSheet("INFO", `[OK] Google Doc créé : ${idGoogleDoc}`);
 
@@ -120,59 +135,121 @@ function surNouvelleDemande(e) {
       .getSheetByName(CFG.NOM_ONGLET_TRACKER);
 
     if (!trackerSheet) {
-      const msg = `[ERREUR] Onglet '${CFG.NOM_ONGLET_TRACKER}' introuvable dans le fichier de suivi.`;
+      const msg = `[ERREUR] Onglet '${CFG.NOM_ONGLET_TRACKER}' introuvable.`;
       console.error(msg);
       _logToSheet("ERREUR", msg);
       return;
     }
 
-    // Construction de la map email → [{processus, signatureId}]
+    // Récupération de l'existant pour la relance ciblée
+    const donneesTracker = trackerSheet.getDataRange().getValues();
+    const existantMap = {}; // { PROCESSUS: { rowIndex, statut, validateur, signatureId, dateValidation } }
+    for (let i = 1; i < donneesTracker.length; i++) {
+      if (donneesTracker[i][COL.REF_DOC] === reference) {
+        const proc = donneesTracker[i][COL.PROCESSUS].toUpperCase();
+        existantMap[proc] = {
+          rowIndex: i + 1,
+          statut: donneesTracker[i][COL.STATUT],
+          validateur: donneesTracker[i][COL.EMAIL_VALID],
+          signatureId: donneesTracker[i][COL.SIGNATURE_ID],
+          dateValidation: donneesTracker[i][COL.DATE_VALIDATION]
+        };
+      }
+    }
+
+    // Regroupement par validateur : email -> [{ processus, rowIndex, isNew }]
     const emailMap = new Map();
 
     processusSelectionnes.forEach(processus => {
-      const emailsValidateurs = configMap[processus.toUpperCase()];
+      let emailsValidateurs = [];
+      if (sousTraitance === 'Oui') {
+        // En cas de sous-traitance, seul Alex est signataire pour tous les processus
+        emailsValidateurs = ['a.devaux@tb-groupe.fr'];
+      } else {
+        emailsValidateurs = configMap[processus.toUpperCase()] || [];
+      }
 
-      if (!emailsValidateurs || emailsValidateurs.length === 0) {
+      if (emailsValidateurs.length === 0) {
         const msg = `[WARN] Aucun validateur configuré pour : "${processus}"`;
         console.warn(msg);
         _logToSheet("WARN", msg);
         return;
       }
 
-      emailsValidateurs.forEach(emailValidateur => {
-        const signatureId = _genererSignatureId();
+      // On affecte le premier validateur de la liste
+      const emailValidateur = emailsValidateurs[0];
+      const procKey = processus.toUpperCase();
 
-        // Insertion d'une ligne dans le Tracker
-        trackerSheet.appendRow([
-          reference,       // A : Ref_Doc
-          nomClient,       // B : Client
-          idGoogleDoc,     // C : Google_Doc_ID
-          processus,       // D : Processus
-          emailValidateur, // E : Validateur_Email
-          signatureId,     // F : Signature_ID
-          'EN_ATTENTE',    // G : Statut
-          new Date(),      // H : Date_Soumission
-          '',              // I : Date_Validation
-          emailDeposant,   // J : Email_Deposant
-          nomDeposant,     // K : Nom_Deposant
-        ]);
-
-        _logToSheet("INFO", `Ajout tracker : ${reference} | Proc: ${processus} | Valid: ${emailValidateur} | SigID: ${signatureId}`);
-
-        // Regroupement pour l'envoi email
+      const existant = existantMap[procKey];
+      if (existant) {
+        if (existant.statut === 'APPROUVÉ') {
+          // Si déjà validé, on met à jour l'ID du Google Doc dans le tracker
+          trackerSheet.getRange(existant.rowIndex, COL.GOOGLE_DOC_ID + 1).setValue(idGoogleDoc);
+          // Et on ré-injecte la signature dans la nouvelle copie du document
+          try {
+            _insererSignatureDansTableau(idGoogleDoc, processus, existant.validateur, existant.signatureId, existant.dateValidation, noRevision);
+            _logToSheet("INFO", `Signature ré-injectée dans le nouveau document pour : ${processus}`);
+          } catch (err) {
+            _logToSheet("WARN", `Échec ré-injection signature pour ${processus} : ${err.message}`);
+          }
+        } else {
+          // Était REFUSÉ ou EN_ATTENTE : relance requise
+          if (!emailMap.has(emailValidateur)) emailMap.set(emailValidateur, []);
+          emailMap.get(emailValidateur).push({ processus, rowIndex: existant.rowIndex, isNew: false });
+        }
+      } else {
+        // Nouveau processus non présent dans la révision précédente
         if (!emailMap.has(emailValidateur)) emailMap.set(emailValidateur, []);
-        emailMap.get(emailValidateur).push({ processus, signatureId });
-      });
+        emailMap.get(emailValidateur).push({ processus, isNew: true });
+      }
     });
 
-    // Envoi d'un seul email par validateur listant tous ses processus à valider
+    // Annulation des processus qui ne font plus partie de la sélection sur cette révision
+    Object.keys(existantMap).forEach(proc => {
+      const selectionne = processusSelectionnes.some(p => p.toUpperCase() === proc);
+      if (!selectionne && existantMap[proc].statut !== 'ANNULÉ') {
+        const row = existantMap[proc].rowIndex;
+        trackerSheet.getRange(row, COL.STATUT + 1).setValue('ANNULÉ');
+        _logToSheet("INFO", `Processus ${proc} retiré de la demande -> Statut : ANNULÉ`);
+      }
+    });
+
+    // Traitement et notification pour chaque validateur (1 seul mail / formulaire par validateur)
     emailMap.forEach((items, emailValidateur) => {
-      _logToSheet("INFO", `Envoi e-mail à ${emailValidateur} pour ${items.length} processus...`);
-      _envoyerEmailDemande(emailValidateur, reference, nomClient, idGoogleDoc, items);
+      const signatureId = _genererSignatureId();
+      
+      items.forEach(item => {
+        if (item.isNew) {
+          trackerSheet.appendRow([
+            reference,       // A : Ref_Doc
+            nomClient,       // B : Client
+            idGoogleDoc,     // C : Google_Doc_ID
+            item.processus,  // D : Processus
+            emailValidateur, // E : Validateur_Email
+            signatureId,     // F : Signature_ID
+            'EN_ATTENTE',    // G : Statut
+            new Date(),      // H : Date_Soumission
+            '',              // I : Date_Validation
+            emailDeposant,   // J : Email_Deposant
+            nomDeposant,     // K : Nom_Deposant
+          ]);
+          _logToSheet("INFO", `Ajout tracker : ${reference} | Proc: ${item.processus} | Valid: ${emailValidateur} | SigID: ${signatureId}`);
+        } else {
+          trackerSheet.getRange(item.rowIndex, COL.GOOGLE_DOC_ID + 1).setValue(idGoogleDoc);
+          trackerSheet.getRange(item.rowIndex, COL.SIGNATURE_ID + 1).setValue(signatureId);
+          trackerSheet.getRange(item.rowIndex, COL.STATUT + 1).setValue('EN_ATTENTE');
+          trackerSheet.getRange(item.rowIndex, COL.DATE_SOUMISSION + 1).setValue(new Date());
+          trackerSheet.getRange(item.rowIndex, COL.DATE_VALIDATION + 1).setValue('');
+          _logToSheet("INFO", `Mise à jour tracker pour relance : ${reference} | Proc: ${item.processus} | Valid: ${emailValidateur} | SigID: ${signatureId}`);
+        }
+      });
+
+      _logToSheet("INFO", `Envoi e-mail groupé à ${emailValidateur} pour ${items.length} processus...`);
+      _envoyerEmailDemande(emailValidateur, reference, nomClient, idGoogleDoc, items, signatureId);
       _logToSheet("INFO", `E-mail envoyé à ${emailValidateur}`);
     });
 
-    const successMsg = `[OK] Dépôt traité : ${reference} — ${processusSelectionnes.length} processus — ${emailMap.size} validateur(s) notifié(s).`;
+    const successMsg = `[OK] Dépôt traité : ${reference} — ${processusSelectionnes.length} processus.`;
     console.log(successMsg);
     _logToSheet("INFO", successMsg);
   } catch (err) {
@@ -200,14 +277,6 @@ function _logToSheet(niveau, message) {
 // FONCTIONS UTILITAIRES
 // ================================================================
 
-/**
- * Gère le fichier source déposé par l'utilisateur :
- *   - Si c'est déjà un Google Doc natif (Option B), il en fait une copie de travail.
- *   - Si c'est un fichier Word (.docx), il le convertit en Google Doc natif via l'API Drive.
- * @param {string} idFichierSource - ID Drive du fichier source
- * @param {string} nomDocument     - Nom à donner au document de travail
- * @returns {string} ID du Google Doc de travail créé
- */
 function _convertirEnGoogleDoc(idFichierSource, nomDocument) {
   const fichier = DriveApp.getFileById(idFichierSource);
   const mimeType = fichier.getMimeType();
@@ -218,22 +287,14 @@ function _convertirEnGoogleDoc(idFichierSource, nomDocument) {
   } else {
     const blob = fichier.getBlob();
     const metadata = {
-      name: `[WIP] ${nomDocument}`, // En v3, c'est 'name' à la place de 'title'
+      name: `[WIP] ${nomDocument}`,
       mimeType: 'application/vnd.google-apps.document'
     };
-    // Utilisation de la syntaxe correcte de l'API Drive v3 dans Apps Script
     const fichierConverti = Drive.Files.create(metadata, blob);
     return fichierConverti.id;
   }
 }
 
-/**
- * Charge la table de configuration processus → liste d'emails depuis le Google Sheet.
- * La feuille doit avoir :
- *   - Colonne A : Nom du processus (ex: "USINAGE")
- *   - Colonne B : Emails séparés par des virgules (ex: "h.megnien@tb.fr, m.berard@tb.fr")
- * @returns {Object} Map { "PROCESSUS_EN_MAJUSCULES": ["email1", "email2"] }
- */
 function _chargerConfigSignataires() {
   const sheet = SpreadsheetApp
     .openById(CFG.ID_SHEET_CONFIG)
@@ -242,7 +303,6 @@ function _chargerConfigSignataires() {
   const donnees = sheet.getDataRange().getValues();
   const configMap = {};
 
-  // On commence à i=1 pour sauter la ligne d'en-têtes
   for (let i = 1; i < donnees.length; i++) {
     const processus = donnees[i][0].toString().trim().toUpperCase();
     const emailsRaw = donnees[i][1].toString();
@@ -258,11 +318,6 @@ function _chargerConfigSignataires() {
   return configMap;
 }
 
-/**
- * Génère un identifiant de signature unique.
- * Format : SIG-YYYYMMDD-XXXX (ex: SIG-20260528-A3F7)
- * @returns {string}
- */
 function _genererSignatureId() {
   const d = new Date();
   const date = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
@@ -270,12 +325,6 @@ function _genererSignatureId() {
   return `SIG-${date}-${suffixe}`;
 }
 
-/**
- * Résout le nom complet d'un déposant depuis son email via le tab "Utilisateurs" du Config Sheet.
- * Si l'email n'est pas trouvé, retourne la partie locale de l'email (ex: "s.guillemin").
- * @param {string} email
- * @returns {string} Nom complet ou fallback sur l'email
- */
 function _nomDepuisEmail(email) {
   try {
     const sheet = SpreadsheetApp
@@ -291,16 +340,9 @@ function _nomDepuisEmail(email) {
   } catch(e) {
     console.warn(`[WARN] Lookup nom impossible pour ${email} : ${e.message}`);
   }
-  // Fallback : extraire "Prenom.Nom" depuis l'email
   return email.split('@')[0].replace('.', ' ');
 }
 
-/**
- * Extrait l'ID Drive depuis une URL Google Drive.
- * Compatible avec les formats /d/ID/ et ?id=ID
- * @param {string} url
- * @returns {string|null}
- */
 function _extraireIdDrive(url) {
   if (!url) return null;
   let m = url.match(/\/d\/([^\/\?]+)/);
@@ -311,72 +353,136 @@ function _extraireIdDrive(url) {
 }
 
 /**
- * Envoie un email HTML au validateur listant tous les processus qui lui sont assignés.
- * Chaque processus a son propre bouton "Valider" avec lien Form 2 pré-rempli.
- *
- * @param {string} emailValidateur - Destinataire
- * @param {string} reference       - Référence du document (ex: FOR-PRO-Comp0500070-REV007)
- * @param {string} nomClient       - Nom du client
- * @param {string} idGoogleDoc     - ID du Google Doc pour le lien de consultation
- * @param {Array}  items           - [{ processus, signatureId }, ...]
+ * Envoie un unique e-mail par validateur contenant un seul bouton de décision
+ * avec les processus concernés cochés automatiquement dans le Formulaire 2.
  */
-function _envoyerEmailDemande(emailValidateur, reference, nomClient, idGoogleDoc, items) {
+function _envoyerEmailDemande(emailValidateur, reference, nomClient, idGoogleDoc, items, signatureId) {
   const lienDocument = `https://docs.google.com/document/d/${idGoogleDoc}/edit`;
 
-  // Construction des lignes du tableau HTML pour chaque processus
-  let lignesTableau = '';
-  items.forEach(({ processus, signatureId }) => {
-    const lienValidation = CFG.URL_FORM_VALIDATION
-      + `?usp=pp_url`
-      + `&${CFG.ENTRY_SIGNATURE_ID}=${encodeURIComponent(signatureId)}`
-      + `&${CFG.ENTRY_PROCESSUS}=${encodeURIComponent(processus)}`;
+  // Construction du lien Formulaire 2 pré-rempli (avec toutes les cases à cocher)
+  let lienValidation = CFG.URL_FORM_VALIDATION
+    + `?usp=pp_url`
+    + `&${CFG.ENTRY_SIGNATURE_ID}=${encodeURIComponent(signatureId)}`;
 
-    lignesTableau += `
-      <tr>
-        <td style="padding:10px 12px; border:1px solid #ddd; font-weight:bold;">${processus}</td>
-        <td style="padding:10px 12px; border:1px solid #ddd; font-family:monospace; color:#555; font-size:12px;">${signatureId}</td>
-        <td style="padding:10px 12px; border:1px solid #ddd; text-align:center;">
-          <a href="${lienValidation}"
-             style="display:inline-block; background:#1a56db; color:white; padding:7px 16px;
-                    text-decoration:none; border-radius:5px; font-size:13px;">
-            Rendre ma décision
-          </a>
-        </td>
-      </tr>`;
+  let listeProcessusHtml = '<ul>';
+  items.forEach(({ processus }) => {
+    lienValidation += `&${CFG.ENTRY_APPROUVES}=${encodeURIComponent(processus)}`;
+    listeProcessusHtml += `<li style="font-weight:bold; font-size:14px; margin-bottom:4px;">${processus}</li>`;
   });
+  listeProcessusHtml += '</ul>';
 
   const sujet = `[VALIDATION REQUISE] ${reference} — Client : ${nomClient}`;
 
   const corps = `
-    <div style="font-family:Arial, sans-serif; color:#1a1a1a; max-width:700px;">
+    <div style="font-family:Arial, sans-serif; color:#1a1a1a; max-width:700px; line-height: 1.5;">
       <p>Bonjour,</p>
       <p>Une fiche produit nécessite votre validation pour le client <strong>${nomClient}</strong>.</p>
 
       <p>
         <a href="${lienDocument}"
-           style="color:#1a56db; font-weight:bold;">
+           style="color:#1a56db; font-weight:bold; font-size:15px; text-decoration:underline;">
           📄 Étape 1 — Consulter le document : ${reference}
         </a>
       </p>
 
-      <p><strong>Étape 2 — Rendre votre décision pour chaque processus :</strong></p>
+      <div style="background:#f9fafb; border-left:4px solid #1a56db; padding:12px 16px; margin:16px 0;">
+        <p style="margin-top:0; font-weight:bold;">Processus sous votre responsabilité :</p>
+        ${listeProcessusHtml}
+      </div>
 
-      <table style="border-collapse:collapse; width:100%; margin-top:8px;">
-        <thead>
-          <tr style="background:#1a3a6b; color:white;">
-            <th style="padding:10px 12px; text-align:left;">Processus</th>
-            <th style="padding:10px 12px; text-align:left;">ID Signature</th>
-            <th style="padding:10px 12px; text-align:center;">Action</th>
-          </tr>
-        </thead>
-        <tbody>${lignesTableau}</tbody>
-      </table>
+      <p><strong>Étape 2 — Rendre votre décision (Groupée) :</strong></p>
+      <p>
+        En cliquant sur le bouton ci-dessous, tous vos processus seront pré-remplis à "J'approuve". Si vous souhaitez en refuser certains, il vous suffira de décocher ces processus dans la section approbation pour les cocher dans la section refus.
+      </p>
 
-      <p style="margin-top:20px; font-size:12px; color:#888;">
-        Chaque lien est pré-rempli avec votre identifiant de signature unique.<br>
-        Si vous n'êtes pas le destinataire visé, ignorez cet email.
+      <div style="margin:20px 0;">
+        <a href="${lienValidation}"
+           style="display:inline-block; background:#1a56db; color:white; padding:10px 22px;
+                  text-decoration:none; border-radius:5px; font-weight:bold; font-size:14px;">
+          Rendre mes décisions
+        </a>
+      </div>
+
+      <p style="margin-top:24px; font-size:12px; color:#888;">
+        Identifiant de signature de groupe : <strong>${signatureId}</strong><br>
+        Si vous n'êtes pas le destinataire visé, ignorez cet e-mail.
       </p>
     </div>`;
 
   MailApp.sendEmail({ to: emailValidateur, subject: sujet, htmlBody: corps });
 }
+
+// ================================================================
+// RÉ-INJECTION DES SIGNATURES EXISTANTES (PAGE 2)
+// ================================================================
+
+function _insererSignatureDansTableau(idGoogleDoc, nomProcessus, emailValidateur, signatureId, dateValidation, noRevision) {
+  const doc  = DocumentApp.openById(idGoogleDoc);
+  const body = doc.getBody();
+
+  const tableHistorique = _trouverTableauHistorique(body);
+  if (!tableHistorique) {
+    throw new Error('Tableau HISTORIQUE DES RÉVISIONS introuvable.');
+  }
+
+  const nomProcessusNormalise = nomProcessus.trim().toUpperCase();
+  const dateStr = Utilities.formatDate(new Date(dateValidation), Session.getScriptTimeZone(), 'dd/MM/yyyy');
+  const texteValideur = `${emailValidateur}\n${signatureId}`;
+
+  let ligneEcrite = false;
+  const numRows = tableHistorique.getNumRows();
+
+  for (let i = 1; i < numRows; i++) {
+    const cellProcessus = tableHistorique.getCell(i, 0).getText().trim().toUpperCase();
+
+    if (cellProcessus === nomProcessusNormalise) {
+      const valideurExistant = tableHistorique.getCell(i, 4).getText().trim();
+      if (!valideurExistant) {
+        tableHistorique.getCell(i, 1).setText(dateStr);
+        tableHistorique.getCell(i, 4).setText(texteValideur);
+        tableHistorique.getCell(i, 5).setText(noRevision);
+        ligneEcrite = true;
+        break;
+      }
+    }
+  }
+
+  if (!ligneEcrite) {
+    const derniereIndex = _trouverDerniereIndexProcessus(tableHistorique, nomProcessusNormalise, numRows);
+    if (derniereIndex >= 0) {
+      tableHistorique.insertRows(derniereIndex + 1, 1);
+      tableHistorique.getCell(derniereIndex + 1, 0).setText(nomProcessus);
+      tableHistorique.getCell(derniereIndex + 1, 1).setText(dateStr);
+      tableHistorique.getCell(derniereIndex + 1, 4).setText(texteValideur);
+      tableHistorique.getCell(derniereIndex + 1, 5).setText(noRevision);
+      ligneEcrite = true;
+    }
+  }
+
+  doc.saveAndClose();
+}
+
+function _trouverTableauHistorique(body) {
+  const tables = body.getTables();
+  for (let t = 0; t < tables.length; t++) {
+    const table = tables[t];
+    if (table.getNumRows() > 0) {
+      const premiereCellule = table.getCell(0, 0).getText().toUpperCase();
+      if (premiereCellule.includes('PROCESSUS') || premiereCellule.includes('HISTORIQUE')) {
+        return table;
+      }
+    }
+  }
+  return null;
+}
+
+function _trouverDerniereIndexProcessus(table, nomProcessusNormalise, numRows) {
+  let dernierIndex = -1;
+  for (let i = 1; i < numRows; i++) {
+    if (table.getCell(i, 0).getText().trim().toUpperCase() === nomProcessusNormalise) {
+      dernierIndex = i;
+    }
+  }
+  return dernierIndex;
+}
+

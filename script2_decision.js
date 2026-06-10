@@ -15,11 +15,11 @@ const CFG = {
 // ---- ORDRE DES COLONNES DANS LA RÉPONSE DU FORMULAIRE 2 ----
 const FORM2 = {
   TIMESTAMP:       0,
-  EMAIL_VALID:     1,  // "Votre adresse email" (colonne B)
-  SIGNATURE_ID:    6,  // "Votre identifiant de signature" (colonne G)
-  PROCESSUS:       7,  // "Processus que vous validez" (colonne H)
-  DECISION:        8,  // "Votre décision" (colonne I)
-  MOTIF_REFUS:     9,  // "Motif du refus" (colonne J)
+  EMAIL_VALID:     1,  // Votre adresse email (colonne B)
+  SIGNATURE_ID:    2,  // Identifiant de signature (colonne C)
+  APPROUVES:       3,  // Processus approuvé(s) (colonne D)
+  REFUSES:         4,  // Processus refusé(s) (colonne E)
+  MOTIF_REFUS:     5,  // Motif du refus (colonne F)
 };
 
 // ---- INDEX DES COLONNES DANS LE TRACKER SHEET (0-based) ----
@@ -41,10 +41,8 @@ const STATUT = {
   EN_ATTENTE: 'EN_ATTENTE',
   APPROUVE:   'APPROUVÉ',
   REFUSE:     'REFUSÉ',
-  ANNULE:     'ANNULÉ',  // Autres validateurs du même processus après qu'un premier ait approuvé
+  ANNULE:     'ANNULÉ',
 };
-
-const DECISION_APPROUVE = "J'approuve";
 
 // ---- POINT D'ENTRÉE PRINCIPAL ----
 function surDecision(e) {
@@ -60,17 +58,16 @@ function surDecision(e) {
     const valeurs = e.values;
     _logToSheet("INFO", "[DIAGNOSTIC] Valeurs brutes reçues (Form 2) : " + JSON.stringify(valeurs));
 
-    if (valeurs.length < 5) {
-      const msg = `[ERREUR] Le formulaire de décision n'a pas assez de colonnes (reçu : ${valeurs.length}, attendu : 5 minimum).`;
+    if (valeurs.length < 3) {
+      const msg = `[ERREUR] Le formulaire de décision n'a pas assez de colonnes (reçu : ${valeurs.length}, attendu : 3 minimum).`;
       console.error(msg);
       _logToSheet("ERREUR", msg);
       return;
     }
 
-    const emailValidateur = valeurs[FORM2.EMAIL_VALID] ? valeurs[FORM2.EMAIL_VALID].trim() : '';
     const signatureId     = valeurs[FORM2.SIGNATURE_ID] ? valeurs[FORM2.SIGNATURE_ID].trim() : '';
-    const processus       = valeurs[FORM2.PROCESSUS] ? valeurs[FORM2.PROCESSUS].trim() : '';
-    const decision        = valeurs[FORM2.DECISION] ? valeurs[FORM2.DECISION].trim() : '';
+    const approuvesRaw    = valeurs[FORM2.APPROUVES] || '';
+    const refusesRaw      = valeurs[FORM2.REFUSES] || '';
     const motifRefus      = valeurs[FORM2.MOTIF_REFUS] || '';
 
     if (!signatureId) {
@@ -80,59 +77,92 @@ function surDecision(e) {
       return;
     }
 
-    _logToSheet("INFO", `Recherche de l'ID de signature : ${signatureId} dans le Tracker...`);
+    // Parsing des choix (le format de Google Forms pour les cases à cocher est une chaîne séparée par des virgules)
+    const approuves = approuvesRaw.split(',').map(s => s.trim().toUpperCase()).filter(s => s.length > 0);
+    const refuses   = refusesRaw.split(',').map(s => s.trim().toUpperCase()).filter(s => s.length > 0);
+
+    _logToSheet("INFO", `Recherche des processus en attente pour la signature : ${signatureId} dans le Tracker...`);
 
     // Chargement du Tracker
     const trackerSpreadsheet = SpreadsheetApp.openById(CFG.ID_SHEET_TRACKER);
     const trackerSheet = trackerSpreadsheet.getSheetByName(CFG.NOM_ONGLET_TRACKER);
     const donnees = trackerSheet.getDataRange().getValues();
 
-    // Recherche de la ligne correspondant à cet identifiant de signature
-    // Seules les lignes EN_ATTENTE sont traitées (protection anti-doublon)
-    let ligneIndex = -1;
+    // Recherche de toutes les lignes correspondantes en attente
+    const lignesAModifier = [];
     for (let i = 1; i < donnees.length; i++) {
       if (
         donnees[i][COL.SIGNATURE_ID] === signatureId &&
         donnees[i][COL.STATUT] === STATUT.EN_ATTENTE
       ) {
-        ligneIndex = i;
-        break;
+        lignesAModifier.push({
+          rowIndex: i + 1,
+          processus: donnees[i][COL.PROCESSUS],
+          emailValidateur: donnees[i][COL.EMAIL_VALID],
+          refDoc: donnees[i][COL.REF_DOC],
+          nomClient: donnees[i][COL.CLIENT],
+          idGoogleDoc: donnees[i][COL.GOOGLE_DOC_ID],
+          emailDeposant: donnees[i][COL.EMAIL_DEPOSANT],
+          nomDeposant: donnees[i][COL.NOM_DEPOSANT]
+        });
       }
     }
 
-    if (ligneIndex === -1) {
-      const msg = `[WARN] Signature ID non trouvé ou déjà traité : ${signatureId}`;
+    if (lignesAModifier.length === 0) {
+      const msg = `[WARN] Aucun processus en attente trouvé pour l'ID de signature : ${signatureId}`;
       console.warn(msg);
       _logToSheet("WARN", msg);
       return;
     }
 
-    // Récupération des métadonnées de ce document depuis le Tracker
-    const refDoc        = donnees[ligneIndex][COL.REF_DOC];
-    const nomClient     = donnees[ligneIndex][COL.CLIENT];
-    const idGoogleDoc   = donnees[ligneIndex][COL.GOOGLE_DOC_ID];
-    const emailDeposant = donnees[ligneIndex][COL.EMAIL_DEPOSANT];
-    const nomDeposant   = donnees[ligneIndex][COL.NOM_DEPOSANT];
-    const rowSheet      = ligneIndex + 1; // +1 car les données commencent à la ligne 2 (ligne 1 = en-têtes)
+    const documentsAValider = new Set();
+    const maintenant = new Date();
 
-    _logToSheet("INFO", `Signature trouvée sur la ligne ${rowSheet} pour le document ${refDoc}`);
+    lignesAModifier.forEach(ligne => {
+      const procUpper = ligne.processus.toUpperCase();
+      documentsAValider.add(ligne.refDoc);
 
-    if (decision === DECISION_APPROUVE) {
-      _logToSheet("INFO", `Décision : Approbation pour le processus ${processus}`);
-      _traiterApprobation(
-        trackerSheet, donnees, rowSheet, ligneIndex,
-        refDoc, nomClient, idGoogleDoc,
-        processus, emailValidateur, signatureId,
-        emailDeposant, nomDeposant
-      );
-    } else {
-      _logToSheet("INFO", `Décision : Refus pour le processus ${processus} (Motif : ${motifRefus})`);
-      _traiterRefus(
-        trackerSheet, rowSheet,
-        refDoc, processus, emailValidateur, motifRefus,
-        emailDeposant, nomDeposant
-      );
-    }
+      if (approuves.includes(procUpper)) {
+        _logToSheet("INFO", `Décision : Approbation pour ${ligne.processus} sur ${ligne.refDoc}`);
+        
+        // 1. Mise à jour du Tracker
+        trackerSheet.getRange(ligne.rowIndex, COL.STATUT + 1).setValue(STATUT.APPROUVE);
+        trackerSheet.getRange(ligne.rowIndex, COL.DATE_VALIDATION + 1).setValue(maintenant);
+
+        // 2. Écriture de la signature dans le Google Doc
+        try {
+          const match = ligne.refDoc.match(/-REV(\d+)/i);
+          const noRevision = match ? match[1] : '001';
+          _insererSignatureDansTableau(ligne.idGoogleDoc, ligne.processus, ligne.emailValidateur, signatureId, maintenant, noRevision);
+          _logToSheet("INFO", `Signature écrite pour ${ligne.processus} (Rév: ${noRevision})`);
+        } catch (err) {
+          _logToSheet("ERREUR", `Écriture signature échouée pour ${ligne.processus} : ${err.message}`);
+        }
+      } else if (refuses.includes(procUpper)) {
+        _logToSheet("INFO", `Décision : Refus pour ${ligne.processus} sur ${ligne.refDoc}`);
+        
+        // 1. Mise à jour du Tracker
+        trackerSheet.getRange(ligne.rowIndex, COL.STATUT + 1).setValue(STATUT.REFUSE);
+        trackerSheet.getRange(ligne.rowIndex, COL.DATE_VALIDATION + 1).setValue(maintenant);
+
+        // 2. Notification de refus au déposant
+        _envoyerEmailRefus(ligne.refDoc, ligne.processus, ligne.emailValidateur, motifRefus, ligne.emailDeposant, ligne.nomDeposant);
+      } else {
+        _logToSheet("WARN", `Le processus ${ligne.processus} n'a pas été sélectionné dans les réponses. Laissé en attente.`);
+      }
+    });
+
+    // 3. Vérification de finalisation par document
+    documentsAValider.forEach(refDoc => {
+      const toutFinalise = _verifierValidationComplete(trackerSheet, refDoc);
+      if (toutFinalise) {
+        _logToSheet("INFO", `[OK] Tous les processus de ${refDoc} sont approuvés — génération du PDF.`);
+        const metadata = lignesAModifier.find(l => l.refDoc === refDoc);
+        if (metadata) {
+          _genererPdfFinal(metadata.idGoogleDoc, refDoc, metadata.nomClient, metadata.emailDeposant, metadata.nomDeposant);
+        }
+      }
+    });
   } catch (err) {
     const errorMsg = `[CRITIQUE] Erreur dans surDecision : ${err.message}\n${err.stack}`;
     console.error(errorMsg);
@@ -155,84 +185,118 @@ function _logToSheet(niveau, message) {
 }
 
 // ================================================================
-// TRAITEMENT APPROBATION
+// FONCTIONS UTILITAIRES
 // ================================================================
 
-function _traiterApprobation(
-  trackerSheet, donnees, rowSheet, ligneIndex,
-  refDoc, nomClient, idGoogleDoc,
-  processus, emailValidateur, signatureId,
-  emailDeposant, nomDeposant
-) {
-  const maintenant = new Date();
-
-  // 1. Mise à jour du Tracker : cette ligne → APPROUVÉ
-  trackerSheet.getRange(rowSheet, COL.STATUT + 1).setValue(STATUT.APPROUVE);
-  trackerSheet.getRange(rowSheet, COL.DATE_VALIDATION + 1).setValue(maintenant);
-
-  // 2. [Modifié] Il faut la signature de chaque valideur (pas de premier arrivé premier servi)
-  // On ne supprime pas les autres validateurs en attente.
-
-  // 3. Écriture de la signature (tableau + bandeau de fin) dans le Google Doc
-  try {
-    _insererSignatureDansTableau(idGoogleDoc, processus, emailValidateur, signatureId, maintenant);
-    _ajouterBandeauSignature(idGoogleDoc, processus, emailValidateur, signatureId, maintenant);
-    console.log(`[OK] Signatures (tableau + bandeau) écrites dans le document pour le processus : ${processus}`);
-  } catch (err) {
-    console.error(`[ERREUR] Écriture des signatures échouée : ${err.message}`);
-    // Non bloquant : on continue même si l'écriture dans le doc a échoué
-  }
-
-
-  // 4. Vérification : tous les processus de ce document sont-ils finalisés ?
-  //    (APPROUVÉ ou ANNULÉ — les EN_ATTENTE bloquent encore)
-  const toutFinalise = _verifierValidationComplete(trackerSheet, refDoc);
-
-  if (toutFinalise) {
-    console.log(`[OK] Tous les processus de ${refDoc} sont finalisés — génération du PDF.`);
-    _genererPdfFinal(idGoogleDoc, refDoc, nomClient, emailDeposant, nomDeposant);
-  }
+function _envoyerEmailRefus(refDoc, processus, emailValidateur, motifRefus, emailDeposant, nomDeposant) {
+  MailApp.sendEmail({
+    to: emailDeposant,
+    subject: `[REFUS] ${refDoc} — Processus : ${processus}`,
+    htmlBody: `
+      <div style="font-family:Arial,sans-serif; color:#1a1a1a; max-width:600px; line-height: 1.5;">
+        <p>Bonjour ${nomDeposant},</p>
+        <p>Le processus <strong>${processus}</strong> de la fiche <strong>${refDoc}</strong> a été <strong style="color:#c0392b;">refusé</strong>.</p>
+        <table style="border-collapse:collapse; width:100%; margin:16px 0;">
+          <tr>
+            <td style="padding:8px 12px; background:#f8f8f8; border:1px solid #ddd; font-weight:bold; width:160px;">Validateur</td>
+            <td style="padding:8px 12px; border:1px solid #ddd;">${emailValidateur}</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 12px; background:#f8f8f8; border:1px solid #ddd; font-weight:bold;">Motif</td>
+            <td style="padding:8px 12px; border:1px solid #ddd;">${motifRefus || 'Non précisé'}</td>
+          </tr>
+        </table>
+        <p>Veuillez corriger le document et soumettre une nouvelle révision.</p>
+      </div>
+    `,
+  });
 }
 
-/**
- * Annule (statut ANNULÉ) toutes les lignes EN_ATTENTE du même document + processus
- * dont le Signature_ID est différent de celui qui vient d'approuver.
- * Cela évite qu'un deuxième validateur puisse encore approuver le même processus.
- */
-function _annulerAutresValidateurs(trackerSheet, donnees, refDoc, processus, signatureIdApprouve) {
+function _verifierValidationComplete(trackerSheet, refDoc) {
+  const donnees = trackerSheet.getDataRange().getValues();
   for (let i = 1; i < donnees.length; i++) {
-    if (
-      donnees[i][COL.REF_DOC]       === refDoc &&
-      donnees[i][COL.PROCESSUS]     === processus &&
-      donnees[i][COL.SIGNATURE_ID]  !== signatureIdApprouve &&
-      donnees[i][COL.STATUT]        === STATUT.EN_ATTENTE
-    ) {
-      trackerSheet.getRange(i + 1, COL.STATUT + 1).setValue(STATUT.ANNULE);
-      console.log(`[OK] Signature annulée (processus déjà approuvé) : ${donnees[i][COL.SIGNATURE_ID]}`);
-    }
+    if (donnees[i][COL.REF_DOC] !== refDoc) continue;
+    const statut = donnees[i][COL.STATUT];
+    if (statut === STATUT.EN_ATTENTE || statut === STATUT.REFUSE) return false;
   }
+  return true;
 }
 
-/**
- * Ouvre le Google Doc et insère les informations de signature dans le tableau HISTORIQUE DES RÉVISIONS.
- *
- * Stratégie de recherche : on parcourt tous les tableaux du document pour trouver
- * celui dont la première cellule contient "HISTORIQUE" — plus robuste que de supposer tables[0].
- *
- * Pour la ligne du processus : on cherche la première ligne dont la colonne PROCESSUS
- * correspond ET dont la colonne VALIDEUR est vide (pour ne pas écraser un historique existant).
- *
- * Colonnes du tableau HISTORIQUE (0-based) :
- *   0 : PROCESSUS   1 : DATE   2 : CONTENU MAJ   3 : RÉDACTEUR   4 : VALIDEUR   5 : N° REVISION
- */
-function _insererSignatureDansTableau(idGoogleDoc, nomProcessus, emailValidateur, signatureId, dateValidation) {
+function _genererPdfFinal(idGoogleDoc, refDoc, nomClient, emailDeposant, nomDeposant) {
+  const pdfBlob = DriveApp.getFileById(idGoogleDoc).getAs('application/pdf');
+  pdfBlob.setName(`[VALIDÉ] ${refDoc}.pdf`);
+
+  const dossierSylob = DriveApp.getFolderById(CFG.ID_DOSSIER_SYLOB);
+
+  let dossierClient;
+  const iterateur = dossierSylob.getFoldersByName(nomClient);
+  if (iterateur.hasNext()) {
+    dossierClient = iterateur.next();
+  } else {
+    dossierClient = dossierSylob.createFolder(nomClient);
+    console.log(`[OK] Sous-dossier client créé : "${nomClient}"`);
+  }
+
+  const pdfCree = dossierClient.createFile(pdfBlob);
+  console.log(`[OK] PDF déposé : ${pdfCree.getUrl()}`);
+
+  // Notification au déposant
+  MailApp.sendEmail({
+    to: emailDeposant,
+    subject: `[VALIDÉ ✓] ${refDoc} — Tous les processus approuvés`,
+    htmlBody: `
+      <div style="font-family:Arial,sans-serif; color:#1a1a1a; max-width:600px; line-height: 1.5;">
+        <p>Bonjour ${nomDeposant},</p>
+        <p>🎉 Tous les processus de la fiche <strong>${refDoc}</strong> ont été approuvés.</p>
+        <p>Le PDF final a été déposé dans le dossier client <strong>${nomClient}</strong> (03 - Fiches Validées).</p>
+        <p>
+          <a href="${pdfCree.getUrl()}"
+             style="display:inline-block; background:#1a56db; color:white; padding:8px 18px;
+                    text-decoration:none; border-radius:5px;">
+            📄 Accéder au PDF validé
+          </a>
+        </p>
+      </div>
+    `,
+  });
+
+  // Envoyé un mail a Sandrine seulement une fois que tout le monde a signé
+  const EMAIL_SANDRINE = "s.guillemin@tb-groupe.fr";
+  MailApp.sendEmail({
+    to: EMAIL_SANDRINE,
+    subject: `[PROD VALIDÉ ✓] ${refDoc} — Prêt pour Sylob`,
+    htmlBody: `
+      <div style="font-family:Arial,sans-serif; color:#1a1a1a; max-width:600px; line-height: 1.5;">
+        <p>Bonjour Sandrine,</p>
+        <p>La validation de la fiche produit <strong>${refDoc}</strong> (Client : <strong>${nomClient}</strong>) est maintenant **complète**.</p>
+        <p>Le document a été signé électroniquement par l'ensemble des décideurs concernés.</p>
+        <p>Le PDF final a été automatiquement généré et classé dans le dossier client.</p>
+        <div style="margin:20px 0;">
+          <a href="${pdfCree.getUrl()}"
+             style="display:inline-block; background:#22c55e; color:white; padding:10px 20px;
+                    text-decoration:none; border-radius:5px; font-weight:bold;">
+            Accéder au PDF Finalisé
+          </a>
+        </div>
+        <p style="font-size:12px; color:#888;">
+          Ce document est prêt pour intégration dans Sylob.
+        </p>
+      </div>
+    `,
+  });
+}
+
+// ================================================================
+// INSCRIPTION DANS LE TABLEAU
+// ================================================================
+
+function _insererSignatureDansTableau(idGoogleDoc, nomProcessus, emailValidateur, signatureId, dateValidation, noRevision) {
   const doc  = DocumentApp.openById(idGoogleDoc);
   const body = doc.getBody();
 
-  // Recherche du tableau HISTORIQUE DES RÉVISIONS
   const tableHistorique = _trouverTableauHistorique(body);
   if (!tableHistorique) {
-    throw new Error('Tableau HISTORIQUE DES RÉVISIONS introuvable dans le document.');
+    throw new Error('Tableau HISTORIQUE DES RÉVISIONS introuvable.');
   }
 
   const nomProcessusNormalise = nomProcessus.trim().toUpperCase();
@@ -246,11 +310,11 @@ function _insererSignatureDansTableau(idGoogleDoc, nomProcessus, emailValidateur
     const cellProcessus = tableHistorique.getCell(i, 0).getText().trim().toUpperCase();
 
     if (cellProcessus === nomProcessusNormalise) {
-      // On cherche une ligne avec la colonne VALIDEUR (col 4) encore vide
       const valideurExistant = tableHistorique.getCell(i, 4).getText().trim();
       if (!valideurExistant) {
-        tableHistorique.getCell(i, 1).setText(dateStr);                    // DATE
-        tableHistorique.getCell(i, 4).setText(texteValideur);             // VALIDEUR
+        tableHistorique.getCell(i, 1).setText(dateStr);
+        tableHistorique.getCell(i, 4).setText(texteValideur);
+        tableHistorique.getCell(i, 5).setText(noRevision);
         ligneEcrite = true;
         break;
       }
@@ -258,28 +322,20 @@ function _insererSignatureDansTableau(idGoogleDoc, nomProcessus, emailValidateur
   }
 
   if (!ligneEcrite) {
-    // Aucune ligne vide trouvée : on insère une nouvelle ligne sous la dernière ligne du processus
     const derniereIndex = _trouverDerniereIndexProcessus(tableHistorique, nomProcessusNormalise, numRows);
     if (derniereIndex >= 0) {
       tableHistorique.insertRows(derniereIndex + 1, 1);
       tableHistorique.getCell(derniereIndex + 1, 0).setText(nomProcessus);
       tableHistorique.getCell(derniereIndex + 1, 1).setText(dateStr);
       tableHistorique.getCell(derniereIndex + 1, 4).setText(texteValideur);
+      tableHistorique.getCell(derniereIndex + 1, 5).setText(noRevision);
       ligneEcrite = true;
     }
   }
 
   doc.saveAndClose();
-
-  if (!ligneEcrite) {
-    console.warn(`[WARN] Processus "${nomProcessus}" non trouvé dans le tableau HISTORIQUE.`);
-  }
 }
 
-/**
- * Parcourt les tableaux du document pour trouver celui qui contient "HISTORIQUE" dans sa première cellule.
- * @returns {GoogleAppsScript.Document.Table|null}
- */
 function _trouverTableauHistorique(body) {
   const tables = body.getTables();
   for (let t = 0; t < tables.length; t++) {
@@ -294,9 +350,6 @@ function _trouverTableauHistorique(body) {
   return null;
 }
 
-/**
- * Retourne l'index de la dernière ligne du tableau correspondant au processus donné.
- */
 function _trouverDerniereIndexProcessus(table, nomProcessusNormalise, numRows) {
   let dernierIndex = -1;
   for (let i = 1; i < numRows; i++) {
@@ -306,144 +359,7 @@ function _trouverDerniereIndexProcessus(table, nomProcessusNormalise, numRows) {
   }
   return dernierIndex;
 }
-
-// ================================================================
-// TRAITEMENT REFUS
-// ================================================================
-
-function _traiterRefus(
-  trackerSheet, rowSheet,
-  refDoc, processus, emailValidateur, motifRefus,
-  emailDeposant, nomDeposant
-) {
-  trackerSheet.getRange(rowSheet, COL.STATUT + 1).setValue(STATUT.REFUSE);
-  trackerSheet.getRange(rowSheet, COL.DATE_VALIDATION + 1).setValue(new Date());
-
-  MailApp.sendEmail({
-    to: emailDeposant,
-    subject: `[REFUS] ${refDoc} — Processus : ${processus}`,
-    htmlBody: `
-      <div style="font-family:Arial,sans-serif; color:#1a1a1a; max-width:600px;">
-        <p>Bonjour ${nomDeposant},</p>
-        <p>Le processus <strong>${processus}</strong> de la fiche <strong>${refDoc}</strong> a été <strong style="color:#c0392b;">refusé</strong>.</p>
-        <table style="border-collapse:collapse; width:100%; margin:16px 0;">
-          <tr>
-            <td style="padding:8px 12px; background:#f8f8f8; border:1px solid #ddd; font-weight:bold; width:160px;">Validateur</td>
-            <td style="padding:8px 12px; border:1px solid #ddd;">${emailValidateur}</td>
-          </tr>
-          <tr>
-            <td style="padding:8px 12px; background:#f8f8f8; border:1px solid #ddd; font-weight:bold;">Motif</td>
-            <td style="padding:8px 12px; border:1px solid #ddd;">${motifRefus || 'Non précisé'}</td>
-          </tr>
-        </table>
-        <p>Veuillez corriger le document et soumettre une nouvelle révision avec un numéro de révision incrémenté.</p>
-      </div>
-    `,
-  });
-
-  console.log(`[OK] Refus enregistré : ${refDoc} — ${processus} — par ${emailValidateur}`);
-}
-
-// ================================================================
-// FINALISATION : VÉRIFICATION + GÉNÉRATION PDF
-// ================================================================
-
-/**
- * Vérifie si tous les processus du document référencé ont atteint un statut final
- * (APPROUVÉ ou ANNULÉ). Les lignes EN_ATTENTE bloquent la génération du PDF.
- */
-function _verifierValidationComplete(trackerSheet, refDoc) {
-  const donnees = trackerSheet.getDataRange().getValues();
-  for (let i = 1; i < donnees.length; i++) {
-    if (donnees[i][COL.REF_DOC] !== refDoc) continue;
-    const statut = donnees[i][COL.STATUT];
-    if (statut === STATUT.EN_ATTENTE) return false;
-    // Un refus bloque aussi la génération → le déposant doit corriger et resoumettre
-    if (statut === STATUT.REFUSE)     return false;
-  }
-  return true;
-}
-
-/**
- * Convertit le Google Doc en PDF, crée le sous-dossier client si nécessaire,
- * dépose le PDF dans "03 - Fiches Validées", et notifie le déposant.
- */
-function _genererPdfFinal(idGoogleDoc, refDoc, nomClient, emailDeposant, nomDeposant) {
-  // Export PDF depuis le Google Doc
-  const pdfBlob = DriveApp.getFileById(idGoogleDoc).getAs('application/pdf');
-  pdfBlob.setName(`[VALIDÉ] ${refDoc}.pdf`);
-
-  // Récupération du dossier "03 - Fiches Validées"
-  const dossierSylob = DriveApp.getFolderById(CFG.ID_DOSSIER_SYLOB);
-
-  // Sous-dossier client : création si inexistant
-  let dossierClient;
-  const iterateur = dossierSylob.getFoldersByName(nomClient);
-  if (iterateur.hasNext()) {
-    dossierClient = iterateur.next();
-  } else {
-    dossierClient = dossierSylob.createFolder(nomClient);
-    console.log(`[OK] Sous-dossier client créé : "${nomClient}"`);
-  }
-
-  // Dépôt du PDF
-  const pdfCree = dossierClient.createFile(pdfBlob);
-  console.log(`[OK] PDF déposé : ${pdfCree.getUrl()}`);
-
-  // Notification au déposant
-  MailApp.sendEmail({
-    to: emailDeposant,
-    subject: `[VALIDÉ ✓] ${refDoc} — Tous les processus approuvés`,
-    htmlBody: `
-      <div style="font-family:Arial,sans-serif; color:#1a1a1a; max-width:600px;">
-        <p>Bonjour ${nomDeposant},</p>
-        <p>🎉 Tous les processus de la fiche <strong>${refDoc}</strong> ont été approuvés.</p>
-        <p>Le PDF final a été déposé dans le dossier client <strong>${nomClient}</strong> (03 - Fiches Validées).</p>
-        <p>
-          <a href="${pdfCree.getUrl()}"
-             style="display:inline-block; background:#1a56db; color:white; padding:8px 18px;
-                    text-decoration:none; border-radius:5px;">
-            📄 Accéder au PDF validé
-          </a>
-        </p>
-        <p style="font-size:12px; color:#888; margin-top:24px;">
-          Ce PDF peut maintenant être importé dans Sylob.
-        </p>
-      </div>
-    `,
-  });
-}
-
-/**
- * Ajoute un bloc de signature visuel (bandeau) à la fin du document Google Doc.
- * Ce bloc matérialise la validation au fer rouge de manière esthétique.
- *
- * @param {string} idGoogleDoc - ID du Google Doc de travail
- * @param {string} nomProcessus - Libellé du processus validé
- * @param {string} emailValidateur - Email du validateur
- * @param {string} signatureId - ID unique de signature (ex: SIG-20260528-XXXX)
- * @param {Date}   dateValidation - Date de signature
- */
-function _ajouterBandeauSignature(idGoogleDoc, nomProcessus, emailValidateur, signatureId, dateValidation) {
-  const doc = DocumentApp.openById(idGoogleDoc);
-  const body = doc.getBody();
-
-  // 1. Ligne de séparation visuelle
-  body.appendHorizontalRule();
-
-  // 2. Titre du bloc
-  const titre = body.appendParagraph("📝 SIGNATURE ÉLECTRONIQUE VALIDE");
-  titre.setHeading(DocumentApp.ParagraphHeading.HEADING3);
-  
-  // Formatage de la date en local (heure française de TB Groupe)
-  const dateStr = Utilities.formatDate(dateValidation, Session.getScriptTimeZone(), 'dd/MM/yyyy HH:mm:ss');
-
-  // 3. Contenu du bandeau
-  body.appendParagraph(`Processus validé : ${nomProcessus}`).setBold(true);
-  body.appendParagraph(`Signataire : ${emailValidateur}`);
-  body.appendParagraph(`Date & Heure : ${dateStr}`);
-  
-  const pSig = body.appendParagraph(`Identifiant de signature : ${signatureId}`);
+ pSig = body.appendParagraph(`Identifiant de signature : ${signatureId}`);
   pSig.setFontFamily("Courier New"); // Police machine à écrire pour l'aspect technique
   
   doc.saveAndClose();
