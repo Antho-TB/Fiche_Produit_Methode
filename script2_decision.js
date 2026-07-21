@@ -47,6 +47,18 @@ const STATUT = {
 // ---- POINT D'ENTRÉE PRINCIPAL ----
 function surDecision(e) {
   _logToSheet("INFO", "Début surDecision");
+
+  // Verrou anti-double-exécution (cf. script1) : évite deux runs concurrents
+  // qui ouvrent/éditent/ferment le même Google Doc en parallèle ("Action not
+  // allowed") et qui doublent les lignes Tracker / e-mails de refus.
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(30000);
+  } catch (lockErr) {
+    _logToSheet("ERREUR", "Verrou non obtenu (exécution concurrente) : " + lockErr.message);
+    return;
+  }
+
   try {
     if (!e || !e.values) {
       const msg = "[ERREUR] Le script a été exécuté manuellement sans données. Veuillez soumettre le Formulaire 2 en direct.";
@@ -124,19 +136,25 @@ function surDecision(e) {
 
       if (approuves.includes(procUpper)) {
         _logToSheet("INFO", `Décision : Approbation pour ${ligne.processus} sur ${ligne.refDoc}`);
-        
-        // 1. Mise à jour du Tracker
-        trackerSheet.getRange(ligne.rowIndex, COL.STATUT + 1).setValue(STATUT.APPROUVE);
-        trackerSheet.getRange(ligne.rowIndex, COL.DATE_VALIDATION + 1).setValue(maintenant);
 
-        // 2. Écriture de la signature dans le Google Doc
+        // 1. Écriture de la signature dans le Google Doc D'ABORD.
+        // Le Tracker n'est marqué APPROUVÉ que si l'écriture réussit vraiment :
+        // avant ce fix, le Tracker passait APPROUVÉ même quand l'écriture
+        // plantait (insertRows inexistant / Action not allowed), ce qui faisait
+        // mentir le suivi (process "validé" mais jamais signé dans le document).
         try {
           const match = ligne.refDoc.match(/-REV(\d+)/i);
           const noRevision = match ? match[1] : '001';
           _insererSignatureDansTableau(ligne.idGoogleDoc, ligne.processus, ligne.emailValidateur, signatureId, maintenant, noRevision);
           _logToSheet("INFO", `Signature écrite pour ${ligne.processus} (Rév: ${noRevision})`);
+
+          // 2. Mise à jour du Tracker seulement après succès de l'écriture
+          trackerSheet.getRange(ligne.rowIndex, COL.STATUT + 1).setValue(STATUT.APPROUVE);
+          trackerSheet.getRange(ligne.rowIndex, COL.DATE_VALIDATION + 1).setValue(maintenant);
         } catch (err) {
-          _logToSheet("ERREUR", `Écriture signature échouée pour ${ligne.processus} : ${err.message}`);
+          _logToSheet("ERREUR", `Écriture signature échouée pour ${ligne.processus} — statut conservé EN_ATTENTE, à retraiter : ${err.message}`);
+          // Ne PAS marquer APPROUVÉ : le statut reste EN_ATTENTE tant que la
+          // signature n'est pas réellement posée dans le document.
         }
       } else if (refuses.includes(procUpper)) {
         _logToSheet("INFO", `Décision : Refus pour ${ligne.processus} sur ${ligne.refDoc}`);
@@ -167,6 +185,8 @@ function surDecision(e) {
     const errorMsg = `[CRITIQUE] Erreur dans surDecision : ${err.message}\n${err.stack}`;
     console.error(errorMsg);
     _logToSheet("ERREUR", errorMsg);
+  } finally {
+    lock.releaseLock();
   }
 }
 
@@ -324,11 +344,16 @@ function _insererSignatureDansTableau(idGoogleDoc, nomProcessus, emailValidateur
   if (!ligneEcrite) {
     const derniereIndex = _trouverDerniereIndexProcessus(tableHistorique, nomProcessusNormalise, numRows);
     if (derniereIndex >= 0) {
-      tableHistorique.insertRows(derniereIndex + 1, 1);
-      tableHistorique.getCell(derniereIndex + 1, 0).setText(nomProcessus);
-      tableHistorique.getCell(derniereIndex + 1, 1).setText(dateStr);
-      tableHistorique.getCell(derniereIndex + 1, 4).setText(texteValideur);
-      tableHistorique.getCell(derniereIndex + 1, 5).setText(noRevision);
+      // Table.insertRows() n'existe pas dans l'API Apps Script — c'était la
+      // cause exacte de "insertRows is not a function" vu en logs le 09/06.
+      // insertTableRow(index, ligneModele) est la méthode correcte : elle
+      // clone la structure d'une ligne existante (nb de colonnes/style).
+      const ligneModele = tableHistorique.getRow(numRows - 1);
+      const nouvelleLigne = tableHistorique.insertTableRow(derniereIndex + 1, ligneModele);
+      nouvelleLigne.getCell(0).setText(nomProcessus);
+      nouvelleLigne.getCell(1).setText(dateStr);
+      nouvelleLigne.getCell(4).setText(texteValideur);
+      nouvelleLigne.getCell(5).setText(noRevision);
       ligneEcrite = true;
     }
   }

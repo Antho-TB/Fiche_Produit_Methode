@@ -54,6 +54,18 @@ const COL = {
 // ---- POINT D'ENTRÉE PRINCIPAL ----
 function surNouvelleDemande(e) {
   _logToSheet("INFO", "Début surNouvelleDemande");
+
+  // Verrou anti-double-exécution : deux triggers (ou deux soumissions quasi
+  // simultanées) qui tournent en parallèle sur le même Doc provoquent des
+  // "Action not allowed" lors de l'écriture Google Docs. Le lock sérialise.
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(30000);
+  } catch (lockErr) {
+    _logToSheet("ERREUR", "Verrou non obtenu (exécution concurrente) : " + lockErr.message);
+    return;
+  }
+
   try {
     if (!e || !e.values) {
       const msg = "[ERREUR] Le script a été exécuté manuellement sans données de formulaire. Pour le tester, veuillez soumettre le Google Form en direct.";
@@ -256,6 +268,8 @@ function surNouvelleDemande(e) {
     const errorMsg = `[CRITIQUE] Erreur inattendue dans surNouvelleDemande : ${err.message}\n${err.stack}`;
     console.error(errorMsg);
     _logToSheet("ERREUR", errorMsg);
+  } finally {
+    lock.releaseLock();
   }
 }
 
@@ -353,20 +367,22 @@ function _extraireIdDrive(url) {
 }
 
 /**
- * Envoie un unique e-mail par validateur contenant un seul bouton de décision
- * avec les processus concernés cochés automatiquement dans le Formulaire 2.
+ * Envoie un unique e-mail par validateur contenant un seul bouton de décision.
+ * Décision réunion du 04/06/2026 : les processus ne sont PAS pré-cochés en
+ * "J'approuve" — le validateur doit cocher lui-même chaque case pour éviter
+ * une approbation par défaut sans relecture réelle.
  */
 function _envoyerEmailDemande(emailValidateur, reference, nomClient, idGoogleDoc, items, signatureId) {
   const lienDocument = `https://docs.google.com/document/d/${idGoogleDoc}/edit`;
 
-  // Construction du lien Formulaire 2 pré-rempli (avec toutes les cases à cocher)
-  let lienValidation = CFG.URL_FORM_VALIDATION
+  // Lien Formulaire 2 pré-rempli uniquement avec l'identifiant de signature.
+  // Aucune case "Approuvé"/"Refusé" n'est pré-cochée (cf. décision du 04/06).
+  const lienValidation = CFG.URL_FORM_VALIDATION
     + `?usp=pp_url`
     + `&${CFG.ENTRY_SIGNATURE_ID}=${encodeURIComponent(signatureId)}`;
 
   let listeProcessusHtml = '<ul>';
   items.forEach(({ processus }) => {
-    lienValidation += `&${CFG.ENTRY_APPROUVES}=${encodeURIComponent(processus)}`;
     listeProcessusHtml += `<li style="font-weight:bold; font-size:14px; margin-bottom:4px;">${processus}</li>`;
   });
   listeProcessusHtml += '</ul>';
@@ -392,7 +408,7 @@ function _envoyerEmailDemande(emailValidateur, reference, nomClient, idGoogleDoc
 
       <p><strong>Étape 2 — Rendre votre décision (Groupée) :</strong></p>
       <p>
-        En cliquant sur le bouton ci-dessous, tous vos processus seront pré-remplis à "J'approuve". Si vous souhaitez en refuser certains, il vous suffira de décocher ces processus dans la section approbation pour les cocher dans la section refus.
+        En cliquant sur le bouton ci-dessous, sélectionnez vous-même chaque processus que vous approuvez (section "J'approuve") ou refusez (section "Je refuse"). Aucune case n'est pré-cochée : merci de traiter individuellement chaque processus listé ci-dessus.
       </p>
 
       <div style="margin:20px 0;">
@@ -450,11 +466,16 @@ function _insererSignatureDansTableau(idGoogleDoc, nomProcessus, emailValidateur
   if (!ligneEcrite) {
     const derniereIndex = _trouverDerniereIndexProcessus(tableHistorique, nomProcessusNormalise, numRows);
     if (derniereIndex >= 0) {
-      tableHistorique.insertRows(derniereIndex + 1, 1);
-      tableHistorique.getCell(derniereIndex + 1, 0).setText(nomProcessus);
-      tableHistorique.getCell(derniereIndex + 1, 1).setText(dateStr);
-      tableHistorique.getCell(derniereIndex + 1, 4).setText(texteValideur);
-      tableHistorique.getCell(derniereIndex + 1, 5).setText(noRevision);
+      // NB : Table.insertRows() n'existe pas dans l'API Google Apps Script
+      // (c'est ça qui provoquait "insertRows is not a function"). La méthode
+      // correcte est insertTableRow(index, ligneModele) qui clone la structure
+      // (nb de colonnes/style) d'une ligne existante.
+      const ligneModele = tableHistorique.getRow(numRows - 1);
+      const nouvelleLigne = tableHistorique.insertTableRow(derniereIndex + 1, ligneModele);
+      nouvelleLigne.getCell(0).setText(nomProcessus);
+      nouvelleLigne.getCell(1).setText(dateStr);
+      nouvelleLigne.getCell(4).setText(texteValideur);
+      nouvelleLigne.getCell(5).setText(noRevision);
       ligneEcrite = true;
     }
   }
@@ -485,4 +506,3 @@ function _trouverDerniereIndexProcessus(table, nomProcessusNormalise, numRows) {
   }
   return dernierIndex;
 }
-
