@@ -154,15 +154,19 @@ function surNouvelleDemande(e) {
     }
 
     // Récupération de l'existant pour la relance ciblée
+    // Clé "PROCESSUS|email" (et non PROCESSUS seul) : toutes les signatures
+    // sont nécessaires, chaque validateur d'un même processus a sa propre
+    // ligne de suivi (confirmé par Antho — pas de "premier qui répond gagne").
     const donneesTracker = trackerSheet.getDataRange().getValues();
-    const existantMap = {}; // { PROCESSUS: { rowIndex, statut, validateur, signatureId, dateValidation } }
+    const existantMap = {}; // { "PROCESSUS|email": { rowIndex, statut, validateur, signatureId, dateValidation } }
     for (let i = 1; i < donneesTracker.length; i++) {
       if (donneesTracker[i][COL.REF_DOC] === reference) {
         const proc = donneesTracker[i][COL.PROCESSUS].toUpperCase();
-        existantMap[proc] = {
+        const email = donneesTracker[i][COL.EMAIL_VALID];
+        existantMap[`${proc}|${email}`] = {
           rowIndex: i + 1,
           statut: donneesTracker[i][COL.STATUT],
-          validateur: donneesTracker[i][COL.EMAIL_VALID],
+          validateur: email,
           signatureId: donneesTracker[i][COL.SIGNATURE_ID],
           dateValidation: donneesTracker[i][COL.DATE_VALIDATION]
         };
@@ -188,41 +192,46 @@ function surNouvelleDemande(e) {
         return;
       }
 
-      // On affecte le premier validateur de la liste
-      const emailValidateur = emailsValidateurs[0];
       const procKey = processus.toUpperCase();
 
-      const existant = existantMap[procKey];
-      if (existant) {
-        if (existant.statut === 'APPROUVÉ') {
-          // Si déjà validé, on met à jour l'ID du Google Doc dans le tracker
-          trackerSheet.getRange(existant.rowIndex, COL.GOOGLE_DOC_ID + 1).setValue(idGoogleDoc);
-          // Et on ré-injecte la signature dans la nouvelle copie du document
-          try {
-            _insererSignatureDansTableau(idGoogleDoc, processus, existant.validateur, existant.signatureId, existant.dateValidation, noRevision);
-            _logToSheet("INFO", `Signature ré-injectée dans le nouveau document pour : ${processus}`);
-          } catch (err) {
-            _logToSheet("WARN", `Échec ré-injection signature pour ${processus} : ${err.message}`);
+      // Toutes les signatures sont nécessaires : chaque validateur configuré
+      // pour ce processus doit approuver individuellement.
+      emailsValidateurs.forEach(emailValidateur => {
+        const cleExistant = `${procKey}|${emailValidateur}`;
+        const existant = existantMap[cleExistant];
+
+        if (existant) {
+          if (existant.statut === 'APPROUVÉ') {
+            // Si déjà validé, on met à jour l'ID du Google Doc dans le tracker
+            trackerSheet.getRange(existant.rowIndex, COL.GOOGLE_DOC_ID + 1).setValue(idGoogleDoc);
+            // Et on ré-injecte la signature dans la nouvelle copie du document
+            try {
+              _insererSignatureDansTableau(idGoogleDoc, processus, existant.validateur, existant.signatureId, existant.dateValidation, noRevision);
+              _logToSheet("INFO", `Signature ré-injectée dans le nouveau document pour : ${processus} (${emailValidateur})`);
+            } catch (err) {
+              _logToSheet("WARN", `Échec ré-injection signature pour ${processus}/${emailValidateur} : ${err.message}`);
+            }
+          } else {
+            // Était REFUSÉ ou EN_ATTENTE : relance requise
+            if (!emailMap.has(emailValidateur)) emailMap.set(emailValidateur, []);
+            emailMap.get(emailValidateur).push({ processus, rowIndex: existant.rowIndex, isNew: false });
           }
         } else {
-          // Était REFUSÉ ou EN_ATTENTE : relance requise
+          // Nouveau (processus, validateur) non présent dans la révision précédente
           if (!emailMap.has(emailValidateur)) emailMap.set(emailValidateur, []);
-          emailMap.get(emailValidateur).push({ processus, rowIndex: existant.rowIndex, isNew: false });
+          emailMap.get(emailValidateur).push({ processus, isNew: true });
         }
-      } else {
-        // Nouveau processus non présent dans la révision précédente
-        if (!emailMap.has(emailValidateur)) emailMap.set(emailValidateur, []);
-        emailMap.get(emailValidateur).push({ processus, isNew: true });
-      }
+      });
     });
 
     // Annulation des processus qui ne font plus partie de la sélection sur cette révision
-    Object.keys(existantMap).forEach(proc => {
+    Object.keys(existantMap).forEach(cle => {
+      const proc = cle.split('|')[0];
       const selectionne = processusSelectionnes.some(p => p.toUpperCase() === proc);
-      if (!selectionne && existantMap[proc].statut !== 'ANNULÉ') {
-        const row = existantMap[proc].rowIndex;
+      if (!selectionne && existantMap[cle].statut !== 'ANNULÉ') {
+        const row = existantMap[cle].rowIndex;
         trackerSheet.getRange(row, COL.STATUT + 1).setValue('ANNULÉ');
-        _logToSheet("INFO", `Processus ${proc} retiré de la demande -> Statut : ANNULÉ`);
+        _logToSheet("INFO", `Processus ${proc} retiré de la demande -> Statut : ANNULÉ (${existantMap[cle].validateur})`);
       }
     });
 
