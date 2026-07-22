@@ -11,9 +11,12 @@ const CFG = {
   URL_FORM_VALIDATION: "https://docs.google.com/forms/d/e/1FAIpQLSf8_40my2WTUGvhh_KlOwOW6BfpUMdFQiRAUklElWiqttOrGQ/viewform",
 
   // IDs des questions pré-remplissables dans le Formulaire 2
-  ENTRY_SIGNATURE_ID: "entry.1011529723",  // Identifiant de signature (Form 2)
-  ENTRY_APPROUVES:    "entry.314648121",   // Processus approuvé(s) (Form 2, cases à cocher)
-  ENTRY_REFUSES:      "entry.1659432920",  // Processus refusé(s) (Form 2, cases à cocher)
+  // Vérifiés le 23/07/2026 via FB_PUBLIC_LOAD_DATA_ du formulaire live
+  // (le formulaire n'a PAS de champ "Décision" -- la décision se déduit de
+  // quel champ Processus est rempli, cf. script2_decision.js).
+  ENTRY_SIGNATURE_ID: "entry.1011529723",  // Identifiant de signature
+  ENTRY_APPROUVES:    "entry.314648121",   // Processus approuvé(s)
+  ENTRY_REFUSES:      "entry.1659432920",  // Processus refusé(s)
 
   // IDs des Google Sheets
   ID_SHEET_CONFIG:   "1-2RpSS6n8FyKhD9rGVGxqFlmJKTfXd0bm3ylZxm6pFA",
@@ -380,17 +383,21 @@ function _extraireIdDrive(url) {
 }
 
 /**
- * Envoie un unique e-mail par validateur, avec UN BOUTON DE DÉCISION PAR PROCESSUS
- * (et non plus un bouton unique groupé). Chaque bouton pré-remplit le Signature_ID
- * qui LUI est propre : le Formulaire 2 étant "1 processus + 1 décision par soumission"
- * dans son architecture réelle, un seul lien groupé rendait impossible de savoir sans
- * ambiguïté quel processus le validateur voulait traiter. Chaque bouton correspond
- * donc à exactement une ligne Tracker, sans dépendre du bon choix du validateur dans
- * le menu déroulant "Processus" du formulaire (script2 fait de toute façon foi sur
- * le Tracker, pas sur ce champ, en filet de sécurité supplémentaire).
- * Décision réunion du 04/06/2026 : rien n'est pré-coché en "J'approuve" — le
- * validateur doit choisir lui-même la décision pour éviter une approbation par
- * défaut sans relecture réelle.
+ * Envoie un unique e-mail par validateur, avec DEUX BOUTONS PAR PROCESSUS
+ * (Approuver / Refuser). Le formulaire live n'a PAS de champ "Décision" --
+ * script2_decision.js déduit l'approbation ou le refus de quel champ
+ * "Processus" a été rempli ("Processus approuvé(s)" vs "Processus refusé(s)").
+ * D'où la nécessité de deux liens distincts : le bouton "Approuver" pré-remplit
+ * uniquement ENTRY_APPROUVES, le bouton "Refuser" pré-remplit uniquement
+ * ENTRY_REFUSES -- l'autre champ reste vide, pas d'ambiguïté possible côté
+ * script2, et plus de risque qu'un "Processus approuvé(s)" pré-rempli traîne
+ * alors que le validateur voulait refuser (bug remonté le 22/07/2026).
+ * Chaque bouton pré-remplit aussi le Signature_ID qui LUI est propre : le
+ * Formulaire 2 étant "1 processus + 1 décision par soumission" dans son
+ * architecture réelle, un lien groupé rendait impossible de savoir sans
+ * ambiguïté quel processus le validateur voulait traiter (script2 fait de
+ * toute façon foi sur le Tracker pour le processus, pas sur ce champ, en
+ * filet de sécurité supplémentaire).
  */
 function _envoyerEmailDemande(emailValidateur, reference, nomClient, idGoogleDoc, items) {
   const lienDocument = `https://docs.google.com/document/d/${idGoogleDoc}/edit`;
@@ -399,24 +406,27 @@ function _envoyerEmailDemande(emailValidateur, reference, nomClient, idGoogleDoc
 
   let boutonsHtml = '';
   items.forEach(({ processus, signatureId }) => {
-    // Pré-remplissage ET pré-sélection du processus (entry.314648121) en plus du
-    // Signature_ID : ça n'empêche pas le validateur d'ouvrir le menu déroulant et
-    // de voir les 13 options (Google Forms ne permet pas de restreindre la liste),
-    // mais la valeur correcte est déjà sélectionnée par défaut à l'ouverture du
-    // lien -- limite la remarque d'Alex Devaux (24/06/2026) à un "vérifiez avant
-    // de valider" plutôt qu'à une sélection manuelle dans 13 choix.
-    const lienValidation = CFG.URL_FORM_VALIDATION
+    const base = CFG.URL_FORM_VALIDATION
       + `?usp=pp_url`
-      + `&${CFG.ENTRY_SIGNATURE_ID}=${encodeURIComponent(signatureId)}`
-      + `&${CFG.ENTRY_APPROUVES}=${encodeURIComponent(processus)}`;
+      + `&${CFG.ENTRY_SIGNATURE_ID}=${encodeURIComponent(signatureId)}`;
+    const lienApprouver = `${base}&${CFG.ENTRY_APPROUVES}=${encodeURIComponent(processus)}`;
+    const lienRefuser   = `${base}&${CFG.ENTRY_REFUSES}=${encodeURIComponent(processus)}`;
+
     boutonsHtml += `
       <div style="display:flex; align-items:center; justify-content:space-between; background:#f9fafb; border-left:4px solid #1a56db; padding:10px 16px; margin:8px 0;">
         <span style="font-weight:bold; font-size:14px;">${processus}</span>
-        <a href="${lienValidation}"
-           style="display:inline-block; background:#1a56db; color:white; padding:8px 18px;
-                  text-decoration:none; border-radius:5px; font-weight:bold; font-size:13px; margin-left:16px;">
-          Rendre ma décision
-        </a>
+        <span>
+          <a href="${lienApprouver}"
+             style="display:inline-block; background:#22c55e; color:white; padding:8px 16px;
+                    text-decoration:none; border-radius:5px; font-weight:bold; font-size:13px; margin-left:8px;">
+            ✓ Approuver
+          </a>
+          <a href="${lienRefuser}"
+             style="display:inline-block; background:#c0392b; color:white; padding:8px 16px;
+                    text-decoration:none; border-radius:5px; font-weight:bold; font-size:13px; margin-left:8px;">
+            ✗ Refuser
+          </a>
+        </span>
       </div>`;
   });
 
@@ -434,7 +444,7 @@ function _envoyerEmailDemande(emailValidateur, reference, nomClient, idGoogleDoc
 
       <p><strong>Étape 2 — Rendre votre décision, processus par processus :</strong></p>
       <p style="color:#555; font-size:13px;">
-        Cliquez sur le bouton du processus concerné, puis choisissez "J'approuve" ou "Je refuse" dans le formulaire qui s'ouvre. Un bouton = un processus = une décision.
+        Cliquez sur "Approuver" ou "Refuser" en face du processus concerné. Le formulaire qui s'ouvre est déjà pré-rempli pour ce processus et cette décision -- en cas de refus, précisez simplement le motif avant de valider.
       </p>
 
       ${boutonsHtml}

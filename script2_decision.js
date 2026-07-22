@@ -21,13 +21,25 @@ const CFG = {
 };
 
 // ---- ORDRE DES COLONNES DANS LA RÉPONSE DU FORMULAIRE 2 ----
+// NB (23/07/2026) : la question "Décision" (J'approuve / Je refuse) a été
+// supprimée du formulaire live à un moment (colonne 8 = "Décision" et colonne
+// 9 = "Si refus, motifs" sont des colonnes MORTES, gelées par Google Forms,
+// qui ne reçoivent plus jamais de valeur). Le formulaire réel actuel n'a que
+// 4 questions actives : Signature_ID, Processus approuvé(s), Processus
+// refusé(s), Motif du refus. La décision se déduit donc de LEQUEL des deux
+// champs "Processus" est rempli, pas d'un champ "Décision" qui n'existe plus.
+// Vérifié via FB_PUBLIC_LOAD_DATA_ du formulaire live le 23/07/2026 :
+//   entry.1011529723 -> Votre identifiant de signature
+//   entry.314648121  -> Processus approuvé(s)
+//   entry.1659432920 -> Processus refusé(s)
+//   entry.1948404303 -> Motif du refus
 const FORM2 = {
-  TIMESTAMP:       0,
-  EMAIL_VALID:     1,  // "Votre adresse email" (colonne B)
-  SIGNATURE_ID:    6,  // "Votre identifiant de signature" (colonne G)
-  PROCESSUS:       7,  // "Processus que vous validez" (colonne H)
-  DECISION:        8,  // "Votre décision" (colonne I)
-  MOTIF_REFUS:     9,  // "Motif du refus" (colonne J)
+  TIMESTAMP:          0,
+  EMAIL_VALID:        1,   // "Adresse e-mail" (colonne B)
+  SIGNATURE_ID:        6,  // "Votre identifiant de signature" (colonne G)
+  PROCESSUS_APPROUVE:  7,  // "Processus approuvé(s)" (colonne H)
+  PROCESSUS_REFUSE:   10,  // "Processus refusé(s)" (colonne K)
+  MOTIF_REFUS:        11,  // "Motif du refus" (colonne L)
 };
 
 // ---- INDEX DES COLONNES DANS LE TRACKER SHEET (0-based) ----
@@ -51,8 +63,6 @@ const STATUT = {
   REFUSE:     'REFUSÉ',
   ANNULE:     'ANNULÉ',
 };
-
-const DECISION_APPROUVE = "J'approuve";
 
 // ---- POINT D'ENTRÉE PRINCIPAL ----
 function surDecision(e) {
@@ -88,14 +98,28 @@ function surDecision(e) {
       return;
     }
 
-    const emailValidateur = valeurs[FORM2.EMAIL_VALID] ? valeurs[FORM2.EMAIL_VALID].trim() : '';
-    const signatureId     = valeurs[FORM2.SIGNATURE_ID] ? valeurs[FORM2.SIGNATURE_ID].trim() : '';
-    const processus       = valeurs[FORM2.PROCESSUS] ? valeurs[FORM2.PROCESSUS].trim() : '';
-    const decision        = valeurs[FORM2.DECISION] ? valeurs[FORM2.DECISION].trim() : '';
-    const motifRefus      = valeurs[FORM2.MOTIF_REFUS] || '';
+    const emailValidateur   = valeurs[FORM2.EMAIL_VALID] ? valeurs[FORM2.EMAIL_VALID].trim() : '';
+    const signatureId       = valeurs[FORM2.SIGNATURE_ID] ? valeurs[FORM2.SIGNATURE_ID].trim() : '';
+    const processusApprouve = valeurs[FORM2.PROCESSUS_APPROUVE] ? valeurs[FORM2.PROCESSUS_APPROUVE].trim() : '';
+    const processusRefuse   = valeurs[FORM2.PROCESSUS_REFUSE] ? valeurs[FORM2.PROCESSUS_REFUSE].trim() : '';
+    const motifRefus        = valeurs[FORM2.MOTIF_REFUS] || '';
 
     if (!signatureId) {
       const msg = '[ERREUR] Signature ID manquant dans la réponse du formulaire.';
+      console.error(msg);
+      _logToSheet("ERREUR", msg);
+      return;
+    }
+
+    // La décision se déduit de quel champ "Processus" a été rempli : le bouton
+    // "Je refuse" ne pré-remplit QUE "Processus refusé(s)", donc sa présence
+    // est le signal fiable de refus (le validateur a explicitement choisi ce
+    // champ). "Processus approuvé(s)" seul => approbation.
+    const processus = processusRefuse || processusApprouve;
+    const decision = processusRefuse ? 'REFUSE' : (processusApprouve ? 'APPROUVE' : '');
+
+    if (!decision) {
+      const msg = `[ERREUR] Ni "Processus approuvé(s)" ni "Processus refusé(s)" n'est rempli pour SigID ${signatureId} — décision impossible à déterminer.`;
       console.error(msg);
       _logToSheet("ERREUR", msg);
       return;
@@ -146,9 +170,9 @@ function surDecision(e) {
       _logToSheet("WARN", `Processus du formulaire ("${processus}") différent du Tracker ("${processusTracker}") pour SigID ${signatureId} — le Tracker fait foi.`);
     }
 
-    _logToSheet("INFO", `Signature trouvée sur la ligne ${rowSheet} pour le document ${refDoc} (processus : ${processusTracker})`);
+    _logToSheet("INFO", `Signature trouvée sur la ligne ${rowSheet} pour le document ${refDoc} (processus : ${processusTracker}, décision : ${decision})`);
 
-    if (decision === DECISION_APPROUVE) {
+    if (decision === 'APPROUVE') {
       _logToSheet("INFO", `Décision : Approbation pour le processus ${processusTracker}`);
       _traiterApprobation(
         trackerSheet, rowSheet,
