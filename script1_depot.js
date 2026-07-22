@@ -235,11 +235,15 @@ function surNouvelleDemande(e) {
       }
     });
 
-    // Traitement et notification pour chaque validateur (1 seul mail / formulaire par validateur)
+    // Traitement et notification pour chaque validateur (1 seul mail par validateur,
+    // mais 1 Signature_ID PAR PROCESSUS -- indispensable : script2 retrouve la ligne
+    // Tracker à mettre à jour uniquement via Signature_ID, donc un ID partagé entre
+    // plusieurs processus d'un même validateur rendrait la mise à jour ambiguë
+    // (mauvaise ligne validée si le validateur a plusieurs processus en attente).
     emailMap.forEach((items, emailValidateur) => {
-      const signatureId = _genererSignatureId();
-      
-      items.forEach(item => {
+      const itemsAvecSignature = items.map(item => ({ ...item, signatureId: _genererSignatureId() }));
+
+      itemsAvecSignature.forEach(item => {
         if (item.isNew) {
           trackerSheet.appendRow([
             reference,       // A : Ref_Doc
@@ -247,26 +251,26 @@ function surNouvelleDemande(e) {
             idGoogleDoc,     // C : Google_Doc_ID
             item.processus,  // D : Processus
             emailValidateur, // E : Validateur_Email
-            signatureId,     // F : Signature_ID
+            item.signatureId,// F : Signature_ID
             'EN_ATTENTE',    // G : Statut
             new Date(),      // H : Date_Soumission
             '',              // I : Date_Validation
             emailDeposant,   // J : Email_Deposant
             nomDeposant,     // K : Nom_Deposant
           ]);
-          _logToSheet("INFO", `Ajout tracker : ${reference} | Proc: ${item.processus} | Valid: ${emailValidateur} | SigID: ${signatureId}`);
+          _logToSheet("INFO", `Ajout tracker : ${reference} | Proc: ${item.processus} | Valid: ${emailValidateur} | SigID: ${item.signatureId}`);
         } else {
           trackerSheet.getRange(item.rowIndex, COL.GOOGLE_DOC_ID + 1).setValue(idGoogleDoc);
-          trackerSheet.getRange(item.rowIndex, COL.SIGNATURE_ID + 1).setValue(signatureId);
+          trackerSheet.getRange(item.rowIndex, COL.SIGNATURE_ID + 1).setValue(item.signatureId);
           trackerSheet.getRange(item.rowIndex, COL.STATUT + 1).setValue('EN_ATTENTE');
           trackerSheet.getRange(item.rowIndex, COL.DATE_SOUMISSION + 1).setValue(new Date());
           trackerSheet.getRange(item.rowIndex, COL.DATE_VALIDATION + 1).setValue('');
-          _logToSheet("INFO", `Mise à jour tracker pour relance : ${reference} | Proc: ${item.processus} | Valid: ${emailValidateur} | SigID: ${signatureId}`);
+          _logToSheet("INFO", `Mise à jour tracker pour relance : ${reference} | Proc: ${item.processus} | Valid: ${emailValidateur} | SigID: ${item.signatureId}`);
         }
       });
 
-      _logToSheet("INFO", `Envoi e-mail groupé à ${emailValidateur} pour ${items.length} processus...`);
-      _envoyerEmailDemande(emailValidateur, reference, nomClient, idGoogleDoc, items, signatureId);
+      _logToSheet("INFO", `Envoi e-mail à ${emailValidateur} pour ${itemsAvecSignature.length} processus...`);
+      _envoyerEmailDemande(emailValidateur, reference, nomClient, idGoogleDoc, itemsAvecSignature);
       _logToSheet("INFO", `E-mail envoyé à ${emailValidateur}`);
     });
 
@@ -376,27 +380,45 @@ function _extraireIdDrive(url) {
 }
 
 /**
- * Envoie un unique e-mail par validateur contenant un seul bouton de décision.
- * Décision réunion du 04/06/2026 : les processus ne sont PAS pré-cochés en
- * "J'approuve" — le validateur doit cocher lui-même chaque case pour éviter
- * une approbation par défaut sans relecture réelle.
+ * Envoie un unique e-mail par validateur, avec UN BOUTON DE DÉCISION PAR PROCESSUS
+ * (et non plus un bouton unique groupé). Chaque bouton pré-remplit le Signature_ID
+ * qui LUI est propre : le Formulaire 2 étant "1 processus + 1 décision par soumission"
+ * dans son architecture réelle, un seul lien groupé rendait impossible de savoir sans
+ * ambiguïté quel processus le validateur voulait traiter. Chaque bouton correspond
+ * donc à exactement une ligne Tracker, sans dépendre du bon choix du validateur dans
+ * le menu déroulant "Processus" du formulaire (script2 fait de toute façon foi sur
+ * le Tracker, pas sur ce champ, en filet de sécurité supplémentaire).
+ * Décision réunion du 04/06/2026 : rien n'est pré-coché en "J'approuve" — le
+ * validateur doit choisir lui-même la décision pour éviter une approbation par
+ * défaut sans relecture réelle.
  */
-function _envoyerEmailDemande(emailValidateur, reference, nomClient, idGoogleDoc, items, signatureId) {
+function _envoyerEmailDemande(emailValidateur, reference, nomClient, idGoogleDoc, items) {
   const lienDocument = `https://docs.google.com/document/d/${idGoogleDoc}/edit`;
 
-  // Lien Formulaire 2 pré-rempli uniquement avec l'identifiant de signature.
-  // Aucune case "Approuvé"/"Refusé" n'est pré-cochée (cf. décision du 04/06).
-  const lienValidation = CFG.URL_FORM_VALIDATION
-    + `?usp=pp_url`
-    + `&${CFG.ENTRY_SIGNATURE_ID}=${encodeURIComponent(signatureId)}`;
-
-  let listeProcessusHtml = '<ul>';
-  items.forEach(({ processus }) => {
-    listeProcessusHtml += `<li style="font-weight:bold; font-size:14px; margin-bottom:4px;">${processus}</li>`;
-  });
-  listeProcessusHtml += '</ul>';
-
   const sujet = `[VALIDATION REQUISE] ${reference} — Client : ${nomClient}`;
+
+  let boutonsHtml = '';
+  items.forEach(({ processus, signatureId }) => {
+    // Pré-remplissage ET pré-sélection du processus (entry.314648121) en plus du
+    // Signature_ID : ça n'empêche pas le validateur d'ouvrir le menu déroulant et
+    // de voir les 13 options (Google Forms ne permet pas de restreindre la liste),
+    // mais la valeur correcte est déjà sélectionnée par défaut à l'ouverture du
+    // lien -- limite la remarque d'Alex Devaux (24/06/2026) à un "vérifiez avant
+    // de valider" plutôt qu'à une sélection manuelle dans 13 choix.
+    const lienValidation = CFG.URL_FORM_VALIDATION
+      + `?usp=pp_url`
+      + `&${CFG.ENTRY_SIGNATURE_ID}=${encodeURIComponent(signatureId)}`
+      + `&${CFG.ENTRY_APPROUVES}=${encodeURIComponent(processus)}`;
+    boutonsHtml += `
+      <div style="display:flex; align-items:center; justify-content:space-between; background:#f9fafb; border-left:4px solid #1a56db; padding:10px 16px; margin:8px 0;">
+        <span style="font-weight:bold; font-size:14px;">${processus}</span>
+        <a href="${lienValidation}"
+           style="display:inline-block; background:#1a56db; color:white; padding:8px 18px;
+                  text-decoration:none; border-radius:5px; font-weight:bold; font-size:13px; margin-left:16px;">
+          Rendre ma décision
+        </a>
+      </div>`;
+  });
 
   const corps = `
     <div style="font-family:Arial, sans-serif; color:#1a1a1a; max-width:700px; line-height: 1.5;">
@@ -410,26 +432,14 @@ function _envoyerEmailDemande(emailValidateur, reference, nomClient, idGoogleDoc
         </a>
       </p>
 
-      <div style="background:#f9fafb; border-left:4px solid #1a56db; padding:12px 16px; margin:16px 0;">
-        <p style="margin-top:0; font-weight:bold;">Processus sous votre responsabilité :</p>
-        ${listeProcessusHtml}
-      </div>
-
-      <p><strong>Étape 2 — Rendre votre décision (Groupée) :</strong></p>
-      <p>
-        En cliquant sur le bouton ci-dessous, sélectionnez vous-même chaque processus que vous approuvez (section "J'approuve") ou refusez (section "Je refuse"). Aucune case n'est pré-cochée : merci de traiter individuellement chaque processus listé ci-dessus.
+      <p><strong>Étape 2 — Rendre votre décision, processus par processus :</strong></p>
+      <p style="color:#555; font-size:13px;">
+        Cliquez sur le bouton du processus concerné, puis choisissez "J'approuve" ou "Je refuse" dans le formulaire qui s'ouvre. Un bouton = un processus = une décision.
       </p>
 
-      <div style="margin:20px 0;">
-        <a href="${lienValidation}"
-           style="display:inline-block; background:#1a56db; color:white; padding:10px 22px;
-                  text-decoration:none; border-radius:5px; font-weight:bold; font-size:14px;">
-          Rendre mes décisions
-        </a>
-      </div>
+      ${boutonsHtml}
 
       <p style="margin-top:24px; font-size:12px; color:#888;">
-        Identifiant de signature de groupe : <strong>${signatureId}</strong><br>
         Si vous n'êtes pas le destinataire visé, ignorez cet e-mail.
       </p>
     </div>`;

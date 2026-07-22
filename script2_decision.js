@@ -135,21 +135,32 @@ function surDecision(e) {
     const nomDeposant   = donnees[ligneIndex][COL.NOM_DEPOSANT];
     const rowSheet      = ligneIndex + 1; // +1 car les données commencent à la ligne 2
 
-    _logToSheet("INFO", `Signature trouvée sur la ligne ${rowSheet} pour le document ${refDoc}`);
+    // Le Signature_ID est désormais unique par (validateur, processus) — généré
+    // ainsi côté script1 — donc la ligne Tracker trouvée fait foi. On utilise SON
+    // processus (colonne D), pas celui renvoyé par le formulaire : si le
+    // validateur a plusieurs décisions à rendre et se trompe de ligne dans le
+    // menu déroulant du Formulaire 2, la ligne Tracker (donc la signature écrite
+    // dans le document) reste correcte plutôt que de suivre une saisie erronée.
+    const processusTracker = donnees[ligneIndex][COL.PROCESSUS];
+    if (processus && processus.trim().toUpperCase() !== processusTracker.trim().toUpperCase()) {
+      _logToSheet("WARN", `Processus du formulaire ("${processus}") différent du Tracker ("${processusTracker}") pour SigID ${signatureId} — le Tracker fait foi.`);
+    }
+
+    _logToSheet("INFO", `Signature trouvée sur la ligne ${rowSheet} pour le document ${refDoc} (processus : ${processusTracker})`);
 
     if (decision === DECISION_APPROUVE) {
-      _logToSheet("INFO", `Décision : Approbation pour le processus ${processus}`);
+      _logToSheet("INFO", `Décision : Approbation pour le processus ${processusTracker}`);
       _traiterApprobation(
         trackerSheet, rowSheet,
         refDoc, nomClient, idGoogleDoc,
-        processus, emailValidateur, signatureId,
+        processusTracker, emailValidateur, signatureId,
         emailDeposant, nomDeposant
       );
     } else {
-      _logToSheet("INFO", `Décision : Refus pour le processus ${processus} (Motif : ${motifRefus})`);
+      _logToSheet("INFO", `Décision : Refus pour le processus ${processusTracker} (Motif : ${motifRefus})`);
       _traiterRefus(
         trackerSheet, rowSheet,
-        refDoc, processus, emailValidateur, motifRefus,
+        refDoc, processusTracker, emailValidateur, motifRefus,
         emailDeposant, nomDeposant
       );
     }
