@@ -95,7 +95,12 @@ function surNouvelleDemande(e) {
     const nomClient     = valeurs[FORM1.NOM_CLIENT] ? valeurs[FORM1.NOM_CLIENT].trim() : 'INCONNU';
     const urlFichier    = valeurs[FORM1.URL_FICHIER] ? valeurs[FORM1.URL_FICHIER].trim() : '';
     const processusRaw  = valeurs[FORM1.PROCESSUS] || '';
-    const sousTraitance = valeurs[FORM1.SOUS_TRAITANCE] ? valeurs[FORM1.SOUS_TRAITANCE].trim() : 'Non';
+    // NB (24/07/2026) : le champ Google Forms "Sous-traitance" est un choix
+    // unique avec options "OUI"/"NON" (majuscules) -- PAS "Oui"/"Non". Une
+    // comparaison sensible à la casse ici faisait échouer silencieusement la
+    // détection de sous-traitance : tous les validateurs du processus étaient
+    // notifiés au lieu du seul Alexandre Devaux (bug remonté par Antho).
+    const sousTraitance = valeurs[FORM1.SOUS_TRAITANCE] ? valeurs[FORM1.SOUS_TRAITANCE].trim().toUpperCase() : 'NON';
 
     if (!urlFichier) {
       const msg = "[ERREUR] L'URL du fichier déposé est vide.";
@@ -181,7 +186,7 @@ function surNouvelleDemande(e) {
 
     processusSelectionnes.forEach(processus => {
       let emailsValidateurs = [];
-      if (sousTraitance === 'Oui') {
+      if (sousTraitance === 'OUI') {
         // En cas de sous-traitance, seul Alex est signataire pour tous les processus
         emailsValidateurs = ['a.devaux@tb-groupe.fr'];
       } else {
