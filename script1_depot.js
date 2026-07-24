@@ -11,10 +11,14 @@ const CFG = {
   URL_FORM_VALIDATION: "https://docs.google.com/forms/d/e/1FAIpQLSf8_40my2WTUGvhh_KlOwOW6BfpUMdFQiRAUklElWiqttOrGQ/viewform",
 
   // IDs des questions pré-remplissables dans le Formulaire 2
-  // Vérifiés le 23/07/2026 via FB_PUBLIC_LOAD_DATA_ du formulaire live
-  // (le formulaire n'a PAS de champ "Décision" -- la décision se déduit de
-  // quel champ Processus est rempli, cf. script2_decision.js).
+  // Vérifiés le 24/07/2026 via FB_PUBLIC_LOAD_DATA_ du formulaire live, après
+  // ajout de la question "Décision" (branchement Approbation/Refus en
+  // sections) : le formulaire n'affiche désormais QUE le champ Processus
+  // pertinent selon la réponse à "Décision" (cf. script2_decision.js pour la
+  // logique de lecture, inchangée -- elle infère toujours de quel champ
+  // Processus est rempli, indépendamment du mécanisme de branchement).
   ENTRY_SIGNATURE_ID: "entry.1011529723",  // Identifiant de signature
+  ENTRY_DECISION:     "entry.1985433554",  // Décision (J'approuve / Je refuse) -- pilote le branchement de section
   ENTRY_APPROUVES:    "entry.314648121",   // Processus approuvé(s)
   ENTRY_REFUSES:      "entry.1659432920",  // Processus refusé(s)
 
@@ -28,16 +32,31 @@ const CFG = {
 };
 
 // ---- ORDRE DES COLONNES DANS LA RÉPONSE DU FORMULAIRE 1 ----
+// NB : Google Forms ajoute les colonnes de réponse dans l'ordre de CRÉATION
+// des questions, pas selon leur position visuelle dans le formulaire. Les
+// questions "Validateur BE" et "Validateur exceptionnel" ont été ajoutées le
+// 24/07/2026 et sont donc en fin de feuille (colonnes I/J) même si elles
+// apparaissent en position 1 dans le formulaire visible par le déposant.
 const FORM1 = {
-  TIMESTAMP:      0,
-  EMAIL_DEPOSANT: 1,  // Adresse e-mail (colonne B)
-  REF_PRODUIT:    2,  // Référence produit (colonne C)
-  NO_REVISION:    3,  // Numéro de révision (colonne D)
-  NOM_CLIENT:     4,  // Nom du client (colonne E)
-  PROCESSUS:      5,  // Processus modifiés (colonne F)
-  URL_FICHIER:    6,  // Fichier source (.docx) (colonne G)
-  SOUS_TRAITANCE: 7,  // Sous-traitance (colonne H, facultatif)
+  TIMESTAMP:               0,
+  EMAIL_DEPOSANT:          1,  // Adresse e-mail (colonne B)
+  REF_PRODUIT:             2,  // Référence produit (colonne C)
+  NO_REVISION:             3,  // Numéro de révision (colonne D)
+  NOM_CLIENT:              4,  // Nom du client (colonne E)
+  PROCESSUS:               5,  // Processus modifiés (colonne F)
+  URL_FICHIER:             6,  // Fichier source (.docx) (colonne G)
+  SOUS_TRAITANCE:          7,  // Sous-traitance (colonne H, facultatif)
+  VALIDATEUR_BE:           8,  // Mathieu / Hervé (colonne I)
+  VALIDATEUR_EXCEPTIONNEL: 9,  // Email libre, facultatif (colonne J)
 };
+
+// Mathieu et Hervé (BE) ne sont jamais tous les deux signataires d'un même
+// produit : le déposant choisit lequel des deux est concerné en question 1
+// du Formulaire 1, l'autre est retiré de la liste des validateurs pour tous
+// les processus où il est configuré dans Config_Signataires (décision
+// Sandrine, 24/07/2026).
+const EMAIL_HERVE   = 'h.megnien@tb-groupe.fr';
+const EMAIL_MATHIEU = 'm.berard@tb-groupe.fr';
 
 // ---- INDEX DES COLONNES DANS LE TRACKER SHEET (0-based) ----
 const COL = {
@@ -101,6 +120,27 @@ function surNouvelleDemande(e) {
     // détection de sous-traitance : tous les validateurs du processus étaient
     // notifiés au lieu du seul Alexandre Devaux (bug remonté par Antho).
     const sousTraitance = valeurs[FORM1.SOUS_TRAITANCE] ? valeurs[FORM1.SOUS_TRAITANCE].trim().toUpperCase() : 'NON';
+
+    // Choix Mathieu / Hervé (question 1 du formulaire, colonne I) : détermine
+    // lequel des deux retirer de la liste des validateurs -- jamais les deux
+    // en même temps sur un même produit.
+    const validateurBE = valeurs[FORM1.VALIDATEUR_BE] ? valeurs[FORM1.VALIDATEUR_BE].trim().toUpperCase() : '';
+    let emailBeAExclure = null;
+    if (validateurBE === 'HERVE' || validateurBE === 'HERVÉ') {
+      emailBeAExclure = EMAIL_MATHIEU;
+    } else if (validateurBE === 'MATHIEU') {
+      emailBeAExclure = EMAIL_HERVE;
+    } else {
+      _logToSheet("WARN", `Choix Mathieu/Hervé absent ou non reconnu ("${validateurBE}") -- Hervé et Mathieu seront TOUS LES DEUX sollicités si configurés sur un processus.`);
+    }
+
+    // Validateur exceptionnel ajouté manuellement par Sandrine (facultatif) :
+    // s'ajoute comme signataire supplémentaire sur TOUS les processus soumis,
+    // peu importe lesquels (décision Sandrine, 24/07/2026).
+    const validateurExceptionnel = valeurs[FORM1.VALIDATEUR_EXCEPTIONNEL] ? valeurs[FORM1.VALIDATEUR_EXCEPTIONNEL].trim() : '';
+    if (validateurExceptionnel && !validateurExceptionnel.includes('@')) {
+      _logToSheet("WARN", `Validateur exceptionnel ignoré, ne ressemble pas à un email : "${validateurExceptionnel}"`);
+    }
 
     if (!urlFichier) {
       const msg = "[ERREUR] L'URL du fichier déposé est vide.";
@@ -190,7 +230,24 @@ function surNouvelleDemande(e) {
         // En cas de sous-traitance, seul Alex est signataire pour tous les processus
         emailsValidateurs = ['a.devaux@tb-groupe.fr'];
       } else {
-        emailsValidateurs = configMap[processus.toUpperCase()] || [];
+        emailsValidateurs = (configMap[processus.toUpperCase()] || []).slice();
+
+        // Retrait du BE non concerné par ce produit (Mathieu XOR Hervé, jamais les deux)
+        if (emailBeAExclure) {
+          emailsValidateurs = emailsValidateurs.filter(
+            e => e.toLowerCase() !== emailBeAExclure.toLowerCase()
+          );
+        }
+
+        // Ajout du validateur exceptionnel de Sandrine sur ce processus (et
+        // donc sur tous les processus, puisque cette boucle s'exécute pour
+        // chacun d'eux), s'il n'y est pas déjà.
+        if (validateurExceptionnel && validateurExceptionnel.includes('@')) {
+          const dejaPresent = emailsValidateurs.some(
+            e => e.toLowerCase() === validateurExceptionnel.toLowerCase()
+          );
+          if (!dejaPresent) emailsValidateurs.push(validateurExceptionnel);
+        }
       }
 
       if (emailsValidateurs.length === 0) {
@@ -389,14 +446,14 @@ function _extraireIdDrive(url) {
 
 /**
  * Envoie un unique e-mail par validateur, avec DEUX BOUTONS PAR PROCESSUS
- * (Approuver / Refuser). Le formulaire live n'a PAS de champ "Décision" --
- * script2_decision.js déduit l'approbation ou le refus de quel champ
- * "Processus" a été rempli ("Processus approuvé(s)" vs "Processus refusé(s)").
- * D'où la nécessité de deux liens distincts : le bouton "Approuver" pré-remplit
- * uniquement ENTRY_APPROUVES, le bouton "Refuser" pré-remplit uniquement
- * ENTRY_REFUSES -- l'autre champ reste vide, pas d'ambiguïté possible côté
- * script2, et plus de risque qu'un "Processus approuvé(s)" pré-rempli traîne
- * alors que le validateur voulait refuser (bug remonté le 22/07/2026).
+ * (Approuver / Refuser). Depuis le 24/07/2026, le Formulaire 2 a une question
+ * "Décision" (J'approuve / Je refuse) qui déclenche un branchement de section :
+ * seul le champ Processus pertinent est affiché au validateur (fini le risque
+ * de confusion Approuvé + Refusé simultanément, demande Sandrine 24/07/2026).
+ * Chaque bouton pré-remplit donc AUSSI ENTRY_DECISION avec la valeur exacte
+ * ("J'approuve" ou "Je refuse") en plus du champ Processus correspondant --
+ * le champ Processus de l'autre décision reste vide et n'est de toute façon
+ * plus affiché au validateur grâce au branchement de section.
  * Chaque bouton pré-remplit aussi le Signature_ID qui LUI est propre : le
  * Formulaire 2 étant "1 processus + 1 décision par soumission" dans son
  * architecture réelle, un lien groupé rendait impossible de savoir sans
@@ -414,8 +471,8 @@ function _envoyerEmailDemande(emailValidateur, reference, nomClient, idGoogleDoc
     const base = CFG.URL_FORM_VALIDATION
       + `?usp=pp_url`
       + `&${CFG.ENTRY_SIGNATURE_ID}=${encodeURIComponent(signatureId)}`;
-    const lienApprouver = `${base}&${CFG.ENTRY_APPROUVES}=${encodeURIComponent(processus)}`;
-    const lienRefuser   = `${base}&${CFG.ENTRY_REFUSES}=${encodeURIComponent(processus)}`;
+    const lienApprouver = `${base}&${CFG.ENTRY_DECISION}=${encodeURIComponent("J'approuve")}&${CFG.ENTRY_APPROUVES}=${encodeURIComponent(processus)}`;
+    const lienRefuser   = `${base}&${CFG.ENTRY_DECISION}=${encodeURIComponent("Je refuse")}&${CFG.ENTRY_REFUSES}=${encodeURIComponent(processus)}`;
 
     boutonsHtml += `
       <div style="display:flex; align-items:center; justify-content:space-between; background:#f9fafb; border-left:4px solid #1a56db; padding:10px 16px; margin:8px 0;">
